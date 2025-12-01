@@ -1,0 +1,604 @@
+import textwrap
+import os
+import sys
+import time
+import re
+import json
+import io
+from contextlib import redirect_stdout
+from typing import List, Dict, Any, Optional, Union
+
+# --- Force Unbuffered Output ---
+sys.stdout.reconfigure(line_buffering=True)
+
+# --- Load Environment Variables ---
+try:
+    from dotenv import load_dotenv
+    load_dotenv() 
+except ImportError:
+    pass
+
+# --- Imports ---
+try:
+    from smolagents import CodeAgent, tool, LiteLLMModel
+except ImportError:
+    print("Error: smolagents not installed. Run: pip install smolagents")
+    sys.exit(1)
+
+try:
+    from erc3 import ERC3, TaskInfo, ApiException
+    # The erc3-dev benchmark uses a different client than store
+    # Import will be resolved at runtime via api.get_erc_dev_client()
+except ImportError:
+    print("Error: erc3 not installed. Run: pip install erc3")
+    sys.exit(1)
+
+# ==============================================================================
+# LOGGING SYSTEM
+# ==============================================================================
+class ActionLogger:
+    """
+    Captures tool interactions to:
+    1. Print them to stdout (for the user) in the requested format.
+    2. Buffer them for the Evaluator.
+    """
+    def __init__(self):
+        self._logs = []
+
+    def log(self, message: str):
+        print(message, flush=True)
+        self._logs.append(message)
+
+    def log_error(self, message: str):
+        self._logs.append(message)
+
+    def get_history_entry(self) -> str:
+        if not self._logs:
+            return "No API interactions recorded this turn."
+        return "\n".join(self._logs)
+
+    def clear(self):
+        self._logs = []
+
+# ==============================================================================
+# SHARED KNOWLEDGE BASE
+# ==============================================================================
+BENCHMARK_CONTEXT = """
+### 1. ENVIRONMENT & DATA STRUCTURES
+You are a business assistant for a company. You must adhere to strict access control and privacy rules specific to the current company context.
+
+**A. Access Control**
+- **Executives**: Broad access.
+- **Project Leads**: Can modify their projects.
+- **Team Members**: Read access.
+- **Guests/Public**: PUBLIC DATA ONLY. No internal details (salaries, deal phases).
+
+**B. Key Entities**
+- **Employee**: `id`, `name`, `email`, `salary` (sensitive), `skills`, `wills`.
+- **Project**: `id`, `name`, `customer`, `status`, `team` (allocations).
+- **Customer**: `id`, `name`, `deal_phase` (sensitive), `account_manager`.
+- **TimeEntry**: `id`, `employee`, `project`, `hours`, `billable`, `status`.
+- **Wiki**: `path`, `content`.
+
+### 2. AVAILABLE TOOLS
+The Worker has tools to interact with the system. Key tools include:
+- `who_ami()`: Returns current user context.
+- `search_employees(query, ...)`: Find colleagues.
+- `search_projects(query, ...)`: Find projects.
+- `search_customers(query, ...)`: Find clients.
+- `search_wiki(query_regex)`: Search documentation.
+- `log_time(...)`: Create time entries.
+- `respond(message, outcome, links)`: **FINAL ACTION**. Submit the answer.
+
+### 3. CRITICAL RULES
+- **Context Awareness**: Check `who_ami()` to know your role and visibility.
+- **Privacy**: Never reveal sensitive data to unauthorized users.
+- **Entity Linking**: When responding, ALWAYS provide `links` to referenced entities (Projects, Customers, Employees).
+- **Outcome**: Use `ok_answer` for success, `cant_answer` if impossible/unauthorized.
+"""
+
+# ==============================================================================
+# TOOL FACTORY
+# ==============================================================================
+def create_tools(client, logger: ActionLogger):
+    
+    task_state = {"completed": False}
+
+    def dispatch_and_log(req, endpoint_path: str):
+        req_data = req.model_dump()
+        log_payload = {"tool": endpoint_path, **req_data}
+        logger.log(f"    [REQ ->] {json.dumps(log_payload)}")
+
+        try:
+            resp = client.dispatch(req)
+        except Exception as e:
+            logger.log(f"    [<- RESP ERROR] {str(e)}")
+            raise e
+
+        if hasattr(resp, 'model_dump'):
+            resp_data = resp.model_dump()
+            logger.log(f"    [<- RESP] {json.dumps(resp_data)}")
+        else:
+            logger.log(f"    [<- RESP] Success")
+            
+        return resp
+
+    # --- Context Tools ---
+    @tool
+    def who_ami() -> Dict[str, Any]:
+        """Returns the current user context and visibility scope."""
+        try:
+            req = dev.Req_WhoAmI()
+            resp = dispatch_and_log(req, "/whoami")
+            return resp.model_dump()
+        except ApiException as e:
+            return {"error": str(e)}
+
+    # --- Employee Tools ---
+    @tool
+    def search_employees(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search employees by text."""
+        try:
+            req = dev.Req_SearchEmployees(query=query, limit=limit, offset=0)
+            resp = dispatch_and_log(req, "/employees/search")
+            return [e.model_dump() for e in resp.employees] if resp.employees else []
+        except ApiException as e:
+            return [{"error": str(e)}]
+
+    @tool
+    def get_employee(id: str) -> Dict[str, Any]:
+        """Get full employee profile by ID."""
+        try:
+            req = dev.Req_GetEmployee(id=id)
+            resp = dispatch_and_log(req, "/employees/get")
+            return resp.employee.model_dump() if resp.employee else {}
+        except ApiException as e:
+            return {"error": str(e)}
+
+    # --- Project Tools ---
+    @tool
+    def search_projects(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search projects by text."""
+        try:
+            req = dev.Req_SearchProjects(query=query, limit=limit, offset=0)
+            resp = dispatch_and_log(req, "/projects/search")
+            return [p.model_dump() for p in resp.projects] if resp.projects else []
+        except ApiException as e:
+            return [{"error": str(e)}]
+
+    @tool
+    def get_project(id: str) -> Dict[str, Any]:
+        """Get detailed project info."""
+        try:
+            req = dev.Req_GetProject(id=id)
+            resp = dispatch_and_log(req, "/projects/get")
+            return resp.project.model_dump() if resp.project else {}
+        except ApiException as e:
+            return {"error": str(e)}
+
+    # --- Customer Tools ---
+    @tool
+    def search_customers(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search customers by text."""
+        try:
+            req = dev.Req_SearchCustomers(query=query, limit=limit, offset=0)
+            resp = dispatch_and_log(req, "/customers/search")
+            return [c.model_dump() for c in resp.companies] if resp.companies else []
+        except ApiException as e:
+            return [{"error": str(e)}]
+
+    @tool
+    def get_customer(id: str) -> Dict[str, Any]:
+        """Get full customer record."""
+        try:
+            req = dev.Req_GetCustomer(id=id)
+            resp = dispatch_and_log(req, "/customers/get")
+            return resp.company.model_dump() if resp.company else {}
+        except ApiException as e:
+            return {"error": str(e)}
+
+    # --- Wiki Tools ---
+    @tool
+    def list_wiki() -> Dict[str, Any]:
+        """List all wiki article paths."""
+        try:
+            req = dev.Req_ListWikiPages()
+            resp = dispatch_and_log(req, "/wiki/list")
+            return resp.model_dump()
+        except ApiException as e:
+            return {"error": str(e)}
+
+    @tool
+    def search_wiki(query_regex: str) -> List[Dict[str, Any]]:
+        """Search wiki articles using regex."""
+        try:
+            req = dev.Req_SearchWikiPages(query_regex=query_regex)
+            resp = dispatch_and_log(req, "/wiki/search")
+            return [r.model_dump() for r in resp.results] if resp.results else []
+        except ApiException as e:
+            return [{"error": str(e)}]
+
+    @tool
+    def load_wiki(file: str) -> Dict[str, Any]:
+        """Load wiki article content."""
+        try:
+            req = dev.Req_LoadWikiPage(file=file)
+            resp = dispatch_and_log(req, "/wiki/load")
+            return resp.model_dump()
+        except ApiException as e:
+            return {"error": str(e)}
+
+    @tool
+    def update_wiki(file: str, content: str) -> str:
+        """Create or update a wiki page."""
+        try:
+            req = dev.Req_UpdateWikiPage(file=file, content=content, changed_by="")
+            dispatch_and_log(req, "/wiki/update")
+            return "Wiki page updated successfully."
+        except ApiException as e:
+            return f"Error updating wiki: {e}"
+
+    # --- Time Tools ---
+    @tool
+    def log_time(employee: str, project: str, hours: float, date: str, notes: str, billable: bool = True) -> Dict[str, Any]:
+        """Log a new time entry."""
+        try:
+            req = dev.Req_LogTimeEntry(
+                employee=employee, project=project, hours=hours, date=date, 
+                notes=notes, billable=billable, work_category="customer_project" # Defaulting for simplicity
+            )
+            resp = dispatch_and_log(req, "/time/log")
+            return resp.model_dump()
+        except ApiException as e:
+            return {"error": str(e)}
+
+    @tool
+    def get_time(id: str) -> Dict[str, Any]:
+        """Get a time entry by ID."""
+        try:
+            req = dev.Req_GetTimeEntry(id=id)
+            resp = dispatch_and_log(req, "/time/get")
+            return resp.entry.model_dump() if resp.entry else {}
+        except ApiException as e:
+            return {"error": str(e)}
+
+    @tool
+    def update_time(id: str, date: str, hours: float, notes: str, billable: bool, status: str) -> str:
+        """Update an existing time entry."""
+        try:
+            req = dev.Req_UpdateTimeEntry(
+                id=id, date=date, hours=hours, notes=notes, 
+                billable=billable, status=status, work_category="customer_project", changed_by=""
+            )
+            dispatch_and_log(req, "/time/update")
+            return "Time entry updated successfully."
+        except ApiException as e:
+            return f"Error updating time entry: {e}"
+
+    @tool
+    def search_time(employee: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search time entries for an employee."""
+        try:
+            req = dev.Req_SearchTimeEntries(employee=employee, limit=limit, offset=0)
+            resp = dispatch_and_log(req, "/time/search")
+            return [e.model_dump() for e in resp.entries] if resp.entries else []
+        except ApiException as e:
+            return [{"error": str(e)}]
+
+    @tool
+    def time_summary_by_project(date_from: str, date_to: str, projects: List[str]) -> List[Dict[str, Any]]:
+        """Get time summary grouped by project."""
+        try:
+            req = dev.Req_TimeSummaryByProject(date_from=date_from, date_to=date_to, projects=projects)
+            resp = dispatch_and_log(req, "/time/summary/by-project")
+            return [s.model_dump() for s in resp.summaries] if resp.summaries else []
+        except ApiException as e:
+            return [{"error": str(e)}]
+
+    @tool
+    def time_summary_by_employee(date_from: str, date_to: str, employees: List[str]) -> List[Dict[str, Any]]:
+        """Get time summary grouped by employee."""
+        try:
+            req = dev.Req_TimeSummaryByEmployee(date_from=date_from, date_to=date_to, employees=employees)
+            resp = dispatch_and_log(req, "/time/summary/by-employee")
+            return [s.model_dump() for s in resp.summaries] if resp.summaries else []
+        except ApiException as e:
+            return [{"error": str(e)}]
+
+    # --- Update Tools ---
+    @tool
+    def update_employee(employee_id: str, salary: int, skills: List[Dict[str, Any]], wills: List[Dict[str, Any]], notes: str) -> Dict[str, Any]:
+        """Update employee info (salary, skills, wills, notes)."""
+        try:
+            # Construct proper objects
+            skill_objs = [dev.Skill(**s) for s in skills]
+            will_objs = [dev.Will(**w) for w in wills]
+            
+            req = dev.Req_UpdateEmployeeInfo(
+                employee=employee_id, salary=salary, skills=skill_objs, wills=will_objs, notes=notes, changed_by=""
+            )
+            resp = dispatch_and_log(req, "/employees/update")
+            return resp.employee.model_dump() if resp.employee else {}
+        except ApiException as e:
+            return {"error": str(e)}
+
+    @tool
+    def update_project_team(project_id: str, team: List[Dict[str, Any]]) -> str:
+        """Update project team allocation."""
+        try:
+            team_objs = [dev.ProjectMember(**m) for m in team]
+            req = dev.Req_UpdateProjectTeam(id=project_id, team=team_objs, changed_by="")
+            dispatch_and_log(req, "/projects/team/update")
+            return "Project team updated successfully."
+        except ApiException as e:
+            return f"Error updating project team: {e}"
+
+    @tool
+    def update_project_status(project_id: str, status: str) -> str:
+        """Update project status."""
+        try:
+            req = dev.Req_UpdateProjectStatus(id=project_id, status=status, changed_by="")
+            dispatch_and_log(req, "/projects/status/update")
+            return "Project status updated successfully."
+        except ApiException as e:
+            return f"Error updating project status: {e}"
+
+    # --- Final Response Tool ---
+    @tool
+    def respond(message: str, outcome: str = "ok_answer", links: List[Dict[str, str]] = []) -> str:
+        """
+        Submits the final response for the task.
+        Args:
+            message: The text response to the user.
+            outcome: 'ok_answer' or 'cant_answer'.
+            links: List of entities referenced, e.g., [{"kind": "employee", "id": "..."}]
+        """
+        if task_state["completed"]: return "Task already completed."
+        
+        # Convert dict links to proper objects if needed, but the API expects specific structure
+        # The tool receives basic types. We need to construct the request.
+        
+        # Helper to parse links if passed as json string or list of dicts
+        parsed_links = []
+        for l in links:
+            if isinstance(l, dict):
+                parsed_links.append(dev.EntityLink(kind=l.get("kind"), id=l.get("id")))
+        
+        try:
+            req = dev.Req_ProvideAgentResponse(message=message, outcome=outcome, links=parsed_links)
+            dispatch_and_log(req, "/respond")
+            task_state["completed"] = True
+            return "Response Submitted Successfully."
+        except ApiException as e:
+            return f"Error submitting response: {e}"
+
+    return [
+        who_ami, 
+        search_employees, get_employee, update_employee,
+        search_projects, get_project, update_project_team, update_project_status,
+        search_customers, get_customer,
+        list_wiki, search_wiki, load_wiki, update_wiki,
+        log_time, get_time, update_time, search_time, time_summary_by_project, time_summary_by_employee,
+        respond
+    ]
+
+# ==============================================================================
+# AGENT 1: THE EVALUATOR (PLANNER)
+# ==============================================================================
+class EvaluatorAgent:
+    def __init__(self, model_id: str, task_description: str):
+        self.model = LiteLLMModel(
+            model_id=model_id,
+            api_base=os.getenv("NEBIUS_API_BASE"),
+            api_key=os.getenv("NEBIUS_API_KEY")
+        )
+        self.task_description = task_description
+        
+        self.system_prompt = textwrap.dedent(f"""
+            You are the **Evaluator Agent** (The Brain) for an AI Business Assistant.
+            You direct a **Worker Agent** (The Hands) who executes Python code.
+            
+            {BENCHMARK_CONTEXT}
+            
+            <PRIME_DIRECTIVES>
+            1. **NO CODING**: DO NOT WRITE CODE. Define the *Plan*.
+            2. **STATE AWARENESS**: Worker is stateless. Provide all IDs/Context in INSTRUCTION.
+            3. **PRIVACY FIRST**: Check `who_ami` output. If public, DO NOT access/reveal internal data.
+            4. **CONTEXT MONITORING**: Watch `wiki_sha1` in `who_ami`. If it changes, the company context (rules/entities) might have changed.
+            5. **ENTITY LINKING**: Collect IDs of all relevant entities (Projects, Customers, People) for the final `respond` call.
+            6. **FINALIZATION**: Use `respond()` to finish. Provide a clear message and ALL relevant links.
+            </PRIME_DIRECTIVES>
+
+            <OUTPUT_FORMAT>
+            THOUGHT: [Reasoning based on logs and context]
+            DECISION: [PROCEED | FINISH]
+            INSTRUCTION: [Specific goal for the Worker]
+            </OUTPUT_FORMAT>
+        """)
+
+    def decide_next_step(self, history: List[str], user_context: Dict[str, Any], last_decision: Optional[str] = None) -> str:
+        context_str = "\n".join(history[-4:])
+        previous_context = f"YOUR PREVIOUS DECISION:\n{last_decision}\n\n" if last_decision else ""
+
+        prompt = (
+            f"{self.system_prompt}\n\n"
+            f"MAIN TASK: {self.task_description}\n\n"
+            f"CURRENT USER CONTEXT:\n{json.dumps(user_context, indent=2)}\n\n"
+            f"{previous_context}"
+            f"EXECUTION LOGS (Last 2 Steps):\n{context_str}\n\n"
+            "Determine the next step."
+        )
+        
+        print(f"\n[Evaluator] Thinking...", flush=True)
+        try:
+            response = self.model(messages=[{"role": "user", "content": prompt}])
+            content = response.content
+            print(f"\n[Evaluator] Decision:\n{content}", flush=True)
+            return content
+        except Exception as e:
+            print(f"[Evaluator] Error: {e}", flush=True)
+            raise e
+
+# ==============================================================================
+# AGENT 2: THE WORKER (CODE AGENT)
+# ==============================================================================
+def create_worker_agent(model_id: str, tools: list):
+    model = LiteLLMModel(
+            model_id=model_id,
+            api_base=os.getenv("NEBIUS_API_BASE"),
+            api_key=os.getenv("NEBIUS_API_KEY")
+            )
+    
+    agent = CodeAgent(
+        tools=tools,
+        model=model,
+        add_base_tools=True,
+        additional_authorized_imports=["math", "json", "time", "re", "datetime"],
+        max_steps=2, 
+        verbosity_level=0
+    )
+    return agent
+
+# ==============================================================================
+# COORDINATOR LOOP
+# ==============================================================================
+def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
+    dev_client = api.get_erc_dev_client(task)
+    
+    logger = ActionLogger()
+    tools_list = create_tools(dev_client, logger)
+    
+    evaluator = EvaluatorAgent(model_id, task.task_text)
+    
+    history = []
+    last_decision = None
+    
+    print(f"\n>>> COORDINATOR STARTING TASK: {task.task_text}", flush=True)
+    
+    # Initial Context Fetch
+    user_context = {}
+    try:
+        who = dev_client.who_am_i()
+        user_context = who.model_dump()
+        print(f"[Coordinator] User Context: {user_context.get('current_user', 'PUBLIC')}", flush=True)
+    except Exception as e:
+        print(f"[Coordinator] Failed to fetch context: {e}")
+
+    max_turns = 7 
+    for turn in range(max_turns):
+        print(f"\n--- TURN {turn + 1} ---", flush=True)
+        logger.clear()
+        
+        # Evaluator Step
+        decision_text = evaluator.decide_next_step(history, user_context, last_decision)
+        last_decision = decision_text
+        
+        # Parse Decision
+        instruction = ""
+        if "INSTRUCTION:" in decision_text:
+            instruction = decision_text.split("INSTRUCTION:", 1)[1].strip()
+        else:
+            instruction = decision_text.split('\n')[-1].strip()
+
+        if "DECISION: FINISH" in decision_text and "respond" not in instruction.lower():
+             # If evaluator thinks it's done but didn't instruct to respond, we might be in a weird state.
+             # But usually the instruction will contain the final action.
+             pass
+
+        print(f"\n[Coordinator] GOAL: {instruction}", flush=True)
+        
+        worker_prompt = (
+            f"""{BENCHMARK_CONTEXT}
+            
+            GOAL: {instruction}
+            
+            PYTHON CODING RULES:
+            1. Output valid Python code in markdown: ```python ... ```
+            2. Use `print()` to log details.
+            3. Use `final_answer('DONE')` to signal completion.
+            4. **FINAL RESPONSE**: If the goal is to answer the user, use the `respond` tool.
+            5. **LINKS**: When using `respond`, construct the `links` list carefully: `[{{"kind": "employee", "id": "..."}}, ...]`.
+            """
+        )
+        
+        try:
+            worker = create_worker_agent(model_id, tools_list)
+            
+            captured_io = io.StringIO()
+            with redirect_stdout(captured_io):
+                worker.run(worker_prompt)
+            
+            worker_output = captured_io.getvalue()
+            print(worker_output, flush=True)
+            
+            # Check for completion signal in logs (naive check)
+            if "/respond" in worker_output and "Success" in worker_output:
+                print(">>> Task Completed via respond().")
+                return "Success"
+
+            history.append(f"Evaluator Instruction: {instruction}")
+            history.append(f"Worker Execution Logs:\n{worker_output}")
+            
+        except Exception as e:
+            error_msg = f"Worker Error: {e}"
+            print(error_msg, flush=True)
+            history.append(f"Evaluator Instruction: {instruction}")
+            history.append(f"Worker Error: {error_msg}")
+
+    return "Max turns reached"
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
+def main():
+    MODEL_ID = "nebius/openai/gpt-oss-20b"
+    
+    if "ERC3_API_KEY" not in os.environ:
+        print("ERROR: 'ERC3_API_KEY' is missing. Check your .env file.")
+        # sys.exit(1)
+
+    print("Initializing ERC3 Session (Dev Agent - Dual Architecture)...", flush=True)
+    try:
+        core = ERC3()
+        res = core.start_session(
+            benchmark="erc3-dev",
+            workspace="my",
+            name="dev_agent_dual_v1",
+            architecture="Evaluator-Worker Dual Agent"
+        )
+    except Exception as e:
+        print(f"Failed to start session: {e}")
+        return
+
+    status = core.session_status(res.session_id)
+    print(f"Session ID: {res.session_id}", flush=True)
+
+    for i, task in enumerate(status.tasks):
+        print(f"\n{'='*60}")
+        print(f"TASK {i+1}/{len(status.tasks)} | ID: {task.task_id}")
+        print(f"{'='*60}", flush=True)
+
+        core.start_task(task)
+        
+        try:
+            run_coordinator(MODEL_ID, core, task)
+        except Exception as e:
+            print(f"Task Failed: {e}", flush=True)
+
+        result = core.complete_task(task)
+        
+        if result.eval:
+            score_color = "\033[92m" if result.eval.score == 1.0 else "\033[91m"
+            reset = "\033[0m"
+            explain = ""
+            if result.eval.logs:
+                explain = "\n" + result.eval.logs
+            print(f"\nSCORE: {score_color}{result.eval.score}{reset}{explain}")
+        else:
+            print("\nTask completed (No evaluation info).", flush=True)
+
+    core.submit_session(res.session_id)
+    print("Session Submitted.", flush=True)
+
+if __name__ == "__main__":
+    main()
