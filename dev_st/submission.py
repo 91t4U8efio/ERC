@@ -736,6 +736,18 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
     except Exception as e:
         print(f"[Coordinator] Failed to fetch context: {e}")
 
+    # Pre-load Wiki Rules (rulebook.md)
+    wiki_rules = ""
+    try:
+        rulebook = dev_client.dispatch(erc3.Req_LoadWiki(file="rulebook.md"))
+        wiki_rules = rulebook.content
+        print(f"[Coordinator] Loaded rulebook.md ({len(wiki_rules)} chars)", flush=True)
+    except Exception as e:
+        print(f"[Coordinator] Failed to load rulebook: {e}")
+    
+    # Add wiki rules to user context for Evaluator
+    user_context["wiki_rules"] = wiki_rules
+
     max_turns = 7 
     for turn in range(max_turns):
         print(f"\n--- TURN {turn + 1} ---", flush=True)
