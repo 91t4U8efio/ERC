@@ -27,8 +27,7 @@ except ImportError:
 
 try:
     from erc3 import ERC3, TaskInfo, ApiException
-    # The erc3-dev benchmark uses a different client than store
-    # Import will be resolved at runtime via api.get_erc_dev_client()
+    from erc3 import erc3  # For accessing pydantic models (Req_*, EntityLink, etc.)
 except ImportError:
     print("Error: erc3 not installed. Run: pip install erc3")
     sys.exit(1)
@@ -128,7 +127,7 @@ def create_tools(client, logger: ActionLogger):
     def who_ami() -> Dict[str, Any]:
         """Returns the current user context and visibility scope."""
         try:
-            req = dev.Req_WhoAmI()
+            req = erc3.Req_WhoAmI()
             resp = dispatch_and_log(req, "/whoami")
             return resp.model_dump()
         except ApiException as e:
@@ -137,9 +136,15 @@ def create_tools(client, logger: ActionLogger):
     # --- Employee Tools ---
     @tool
     def search_employees(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Search employees by text."""
+        """
+        Search employees by text.
+
+        Args:
+            query: The search query string.
+            limit: Maximum number of results to return.
+        """
         try:
-            req = dev.Req_SearchEmployees(query=query, limit=limit, offset=0)
+            req = erc3.Req_SearchEmployees(query=query, limit=limit, offset=0)
             resp = dispatch_and_log(req, "/employees/search")
             return [e.model_dump() for e in resp.employees] if resp.employees else []
         except ApiException as e:
@@ -147,9 +152,14 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def get_employee(id: str) -> Dict[str, Any]:
-        """Get full employee profile by ID."""
+        """
+        Get full employee profile by ID.
+
+        Args:
+            id: The ID of the employee to retrieve.
+        """
         try:
-            req = dev.Req_GetEmployee(id=id)
+            req = erc3.Req_GetEmployee(id=id)
             resp = dispatch_and_log(req, "/employees/get")
             return resp.employee.model_dump() if resp.employee else {}
         except ApiException as e:
@@ -158,9 +168,15 @@ def create_tools(client, logger: ActionLogger):
     # --- Project Tools ---
     @tool
     def search_projects(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Search projects by text."""
+        """
+        Search projects by text.
+
+        Args:
+            query: The search query string.
+            limit: Maximum number of results to return.
+        """
         try:
-            req = dev.Req_SearchProjects(query=query, limit=limit, offset=0)
+            req = erc3.Req_SearchProjects(query=query, limit=limit, offset=0)
             resp = dispatch_and_log(req, "/projects/search")
             return [p.model_dump() for p in resp.projects] if resp.projects else []
         except ApiException as e:
@@ -168,9 +184,14 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def get_project(id: str) -> Dict[str, Any]:
-        """Get detailed project info."""
+        """
+        Get detailed project info.
+
+        Args:
+            id: The ID of the project to retrieve.
+        """
         try:
-            req = dev.Req_GetProject(id=id)
+            req = erc3.Req_GetProject(id=id)
             resp = dispatch_and_log(req, "/projects/get")
             return resp.project.model_dump() if resp.project else {}
         except ApiException as e:
@@ -179,9 +200,15 @@ def create_tools(client, logger: ActionLogger):
     # --- Customer Tools ---
     @tool
     def search_customers(query: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Search customers by text."""
+        """
+        Search customers by text.
+
+        Args:
+            query: The search query string.
+            limit: Maximum number of results to return.
+        """
         try:
-            req = dev.Req_SearchCustomers(query=query, limit=limit, offset=0)
+            req = erc3.Req_SearchCustomers(query=query, limit=limit, offset=0)
             resp = dispatch_and_log(req, "/customers/search")
             return [c.model_dump() for c in resp.companies] if resp.companies else []
         except ApiException as e:
@@ -189,9 +216,14 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def get_customer(id: str) -> Dict[str, Any]:
-        """Get full customer record."""
+        """
+        Get full customer record.
+
+        Args:
+            id: The ID of the customer to retrieve.
+        """
         try:
-            req = dev.Req_GetCustomer(id=id)
+            req = erc3.Req_GetCustomer(id=id)
             resp = dispatch_and_log(req, "/customers/get")
             return resp.company.model_dump() if resp.company else {}
         except ApiException as e:
@@ -202,7 +234,7 @@ def create_tools(client, logger: ActionLogger):
     def list_wiki() -> Dict[str, Any]:
         """List all wiki article paths."""
         try:
-            req = dev.Req_ListWikiPages()
+            req = erc3.Req_ListWikiPages()
             resp = dispatch_and_log(req, "/wiki/list")
             return resp.model_dump()
         except ApiException as e:
@@ -210,9 +242,14 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def search_wiki(query_regex: str) -> List[Dict[str, Any]]:
-        """Search wiki articles using regex."""
+        """
+        Search wiki articles using regex.
+
+        Args:
+            query_regex: The regex pattern to search for in wiki pages.
+        """
         try:
-            req = dev.Req_SearchWikiPages(query_regex=query_regex)
+            req = erc3.Req_SearchWikiPages(query_regex=query_regex)
             resp = dispatch_and_log(req, "/wiki/search")
             return [r.model_dump() for r in resp.results] if resp.results else []
         except ApiException as e:
@@ -220,9 +257,14 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def load_wiki(file: str) -> Dict[str, Any]:
-        """Load wiki article content."""
+        """
+        Load wiki article content.
+
+        Args:
+            file: The path of the wiki file to load.
+        """
         try:
-            req = dev.Req_LoadWikiPage(file=file)
+            req = erc3.Req_LoadWikiPage(file=file)
             resp = dispatch_and_log(req, "/wiki/load")
             return resp.model_dump()
         except ApiException as e:
@@ -230,9 +272,15 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def update_wiki(file: str, content: str) -> str:
-        """Create or update a wiki page."""
+        """
+        Create or update a wiki page.
+
+        Args:
+            file: The path of the wiki file to update.
+            content: The new content for the wiki page.
+        """
         try:
-            req = dev.Req_UpdateWikiPage(file=file, content=content, changed_by="")
+            req = erc3.Req_UpdateWikiPage(file=file, content=content, changed_by="")
             dispatch_and_log(req, "/wiki/update")
             return "Wiki page updated successfully."
         except ApiException as e:
@@ -241,9 +289,19 @@ def create_tools(client, logger: ActionLogger):
     # --- Time Tools ---
     @tool
     def log_time(employee: str, project: str, hours: float, date: str, notes: str, billable: bool = True) -> Dict[str, Any]:
-        """Log a new time entry."""
+        """
+        Log a new time entry.
+
+        Args:
+            employee: The ID of the employee.
+            project: The ID of the project.
+            hours: Number of hours worked.
+            date: Date of work (YYYY-MM-DD).
+            notes: Description of work done.
+            billable: Whether the work is billable.
+        """
         try:
-            req = dev.Req_LogTimeEntry(
+            req = erc3.Req_LogTimeEntry(
                 employee=employee, project=project, hours=hours, date=date, 
                 notes=notes, billable=billable, work_category="customer_project" # Defaulting for simplicity
             )
@@ -254,9 +312,14 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def get_time(id: str) -> Dict[str, Any]:
-        """Get a time entry by ID."""
+        """
+        Get a time entry by ID.
+
+        Args:
+            id: The ID of the time entry.
+        """
         try:
-            req = dev.Req_GetTimeEntry(id=id)
+            req = erc3.Req_GetTimeEntry(id=id)
             resp = dispatch_and_log(req, "/time/get")
             return resp.entry.model_dump() if resp.entry else {}
         except ApiException as e:
@@ -264,9 +327,19 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def update_time(id: str, date: str, hours: float, notes: str, billable: bool, status: str) -> str:
-        """Update an existing time entry."""
+        """
+        Update an existing time entry.
+
+        Args:
+            id: The ID of the time entry to update.
+            date: New date (YYYY-MM-DD).
+            hours: New number of hours.
+            notes: New notes.
+            billable: New billable status.
+            status: New status (e.g., 'draft', 'submitted').
+        """
         try:
-            req = dev.Req_UpdateTimeEntry(
+            req = erc3.Req_UpdateTimeEntry(
                 id=id, date=date, hours=hours, notes=notes, 
                 billable=billable, status=status, work_category="customer_project", changed_by=""
             )
@@ -277,9 +350,15 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def search_time(employee: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """Search time entries for an employee."""
+        """
+        Search time entries for an employee.
+
+        Args:
+            employee: The ID of the employee.
+            limit: Maximum number of entries to return.
+        """
         try:
-            req = dev.Req_SearchTimeEntries(employee=employee, limit=limit, offset=0)
+            req = erc3.Req_SearchTimeEntries(employee=employee, limit=limit, offset=0)
             resp = dispatch_and_log(req, "/time/search")
             return [e.model_dump() for e in resp.entries] if resp.entries else []
         except ApiException as e:
@@ -287,9 +366,16 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def time_summary_by_project(date_from: str, date_to: str, projects: List[str]) -> List[Dict[str, Any]]:
-        """Get time summary grouped by project."""
+        """
+        Get time summary grouped by project.
+
+        Args:
+            date_from: Start date (YYYY-MM-DD).
+            date_to: End date (YYYY-MM-DD).
+            projects: List of project IDs to summarize.
+        """
         try:
-            req = dev.Req_TimeSummaryByProject(date_from=date_from, date_to=date_to, projects=projects)
+            req = erc3.Req_TimeSummaryByProject(date_from=date_from, date_to=date_to, projects=projects)
             resp = dispatch_and_log(req, "/time/summary/by-project")
             return [s.model_dump() for s in resp.summaries] if resp.summaries else []
         except ApiException as e:
@@ -297,9 +383,16 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def time_summary_by_employee(date_from: str, date_to: str, employees: List[str]) -> List[Dict[str, Any]]:
-        """Get time summary grouped by employee."""
+        """
+        Get time summary grouped by employee.
+
+        Args:
+            date_from: Start date (YYYY-MM-DD).
+            date_to: End date (YYYY-MM-DD).
+            employees: List of employee IDs to summarize.
+        """
         try:
-            req = dev.Req_TimeSummaryByEmployee(date_from=date_from, date_to=date_to, employees=employees)
+            req = erc3.Req_TimeSummaryByEmployee(date_from=date_from, date_to=date_to, employees=employees)
             resp = dispatch_and_log(req, "/time/summary/by-employee")
             return [s.model_dump() for s in resp.summaries] if resp.summaries else []
         except ApiException as e:
@@ -308,13 +401,22 @@ def create_tools(client, logger: ActionLogger):
     # --- Update Tools ---
     @tool
     def update_employee(employee_id: str, salary: int, skills: List[Dict[str, Any]], wills: List[Dict[str, Any]], notes: str) -> Dict[str, Any]:
-        """Update employee info (salary, skills, wills, notes)."""
+        """
+        Update employee info (salary, skills, wills, notes).
+
+        Args:
+            employee_id: The ID of the employee.
+            salary: New salary amount.
+            skills: List of skill objects.
+            wills: List of will objects.
+            notes: New notes.
+        """
         try:
             # Construct proper objects
-            skill_objs = [dev.Skill(**s) for s in skills]
-            will_objs = [dev.Will(**w) for w in wills]
+            skill_objs = [erc3.Skill(**s) for s in skills]
+            will_objs = [erc3.Will(**w) for w in wills]
             
-            req = dev.Req_UpdateEmployeeInfo(
+            req = erc3.Req_UpdateEmployeeInfo(
                 employee=employee_id, salary=salary, skills=skill_objs, wills=will_objs, notes=notes, changed_by=""
             )
             resp = dispatch_and_log(req, "/employees/update")
@@ -324,10 +426,16 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def update_project_team(project_id: str, team: List[Dict[str, Any]]) -> str:
-        """Update project team allocation."""
+        """
+        Update project team allocation.
+
+        Args:
+            project_id: The ID of the project.
+            team: List of team member objects.
+        """
         try:
-            team_objs = [dev.ProjectMember(**m) for m in team]
-            req = dev.Req_UpdateProjectTeam(id=project_id, team=team_objs, changed_by="")
+            team_objs = [erc3.ProjectMember(**m) for m in team]
+            req = erc3.Req_UpdateProjectTeam(id=project_id, team=team_objs, changed_by="")
             dispatch_and_log(req, "/projects/team/update")
             return "Project team updated successfully."
         except ApiException as e:
@@ -335,9 +443,15 @@ def create_tools(client, logger: ActionLogger):
 
     @tool
     def update_project_status(project_id: str, status: str) -> str:
-        """Update project status."""
+        """
+        Update project status.
+
+        Args:
+            project_id: The ID of the project.
+            status: New status string.
+        """
         try:
-            req = dev.Req_UpdateProjectStatus(id=project_id, status=status, changed_by="")
+            req = erc3.Req_UpdateProjectStatus(id=project_id, status=status, changed_by="")
             dispatch_and_log(req, "/projects/status/update")
             return "Project status updated successfully."
         except ApiException as e:
@@ -362,10 +476,10 @@ def create_tools(client, logger: ActionLogger):
         parsed_links = []
         for l in links:
             if isinstance(l, dict):
-                parsed_links.append(dev.EntityLink(kind=l.get("kind"), id=l.get("id")))
+                parsed_links.append(erc3.EntityLink(kind=l.get("kind"), id=l.get("id")))
         
         try:
-            req = dev.Req_ProvideAgentResponse(message=message, outcome=outcome, links=parsed_links)
+            req = erc3.Req_ProvideAgentResponse(message=message, outcome=outcome, links=parsed_links)
             dispatch_and_log(req, "/respond")
             task_state["completed"] = True
             return "Response Submitted Successfully."
