@@ -70,11 +70,11 @@ You are a business assistant for a company. You must adhere to strict access con
 - **Executives**: Broad access to all data.
 - **Project Leads**: Can modify projects they lead.
 - **Team Members**: Read access to most data.
-- **Guests/Public (is_public=true)**: PUBLIC DATA ONLY. No internal details (salaries, deal phases, employee IDs).
+- **Guests/Public (is_public=true)**: PUBLIC DATA ONLY. No internal details (salaries, deal phases, employee IDs, project IDs).
 
 **B. Key Entities**
 - **Employee**: `id`, `name`, `email`, `salary` (SENSITIVE), `location`, `department`, `skills`, `wills`, `notes`.
-- **Project**: `id`, `name`, `customer`, `status`, `description`, `team` (list of allocations with employee, time_slice, role).
+- **Project**: `id` (SENSITIVE for public users), `name`, `customer`, `status`, `description`, `team` (list of allocations with employee, time_slice, role).
 - **Customer**: `id`, `name`, `brief`, `location`, `deal_phase` (SENSITIVE), `high_level_status`, `account_manager`, `primary_contact_name`, `primary_contact_email`.
 - **TimeEntry**: `id`, `employee`, `customer`, `project`, `date`, `hours`, `work_category`, `notes`, `billable`, `status`.
 - **Wiki**: `path`, `content`.
@@ -83,12 +83,14 @@ You are a business assistant for a company. You must adhere to strict access con
 
 **Context Tools:**
 - `who_ami()` → Dict: Returns current user context (current_user, is_public, location, department, today, wiki_sha1).
+  - **IMPORTANT**: Use `today` field for date calculations (e.g., 'yesterday' = today minus 1 day).
 
 **Employee Tools:**
 - `list_employees(limit=5, offset=0)` → Dict: List employees with pagination.
 - `search_employees(query, limit=5)` → List[Dict]: Search employees by text.
 - `get_employee(id)` → Dict: Get full employee profile by ID.
 - `update_employee(employee_id, salary, skills, wills, notes)` → Dict: Update employee info.
+  - **CAUTION**: Only update the SPECIFIC field requested. Do NOT change other fields.
 
 **Project Tools:**
 - `list_projects(limit=5, offset=0)` → Dict: List projects with pagination.
@@ -100,7 +102,7 @@ You are a business assistant for a company. You must adhere to strict access con
 **Customer Tools:**
 - `list_customers(limit=5, offset=0)` → Dict: List customers with pagination.
 - `search_customers(query, limit=5)` → List[Dict]: Search customers by text.
-- `get_customer(id)` → Dict: Get full customer record.
+- `get_customer(id)` → Dict: Get full customer record (includes primary_contact_email).
 
 **Wiki Tools:**
 - `list_wiki()` → Dict: List all wiki article paths.
@@ -110,6 +112,9 @@ You are a business assistant for a company. You must adhere to strict access con
 
 **Time Tracking Tools:**
 - `log_time(employee, project, hours, date, notes, billable=True)` → Dict: Log a new time entry.
+  - **DATE FORMAT**: Use YYYY-MM-DD format. Calculate from `today` in who_ami for relative dates.
+  - **EMPLOYEE**: Use current_user from who_ami if 'me' or self-reference.
+  - **PROJECT**: Search for project first to get exact project ID.
 - `get_time(id)` → Dict: Get a time entry by ID.
 - `update_time(id, date, hours, notes, billable, status)` → str: Update an existing time entry.
 - `search_time(employee, limit=10)` → List[Dict]: Search time entries for an employee.
@@ -122,12 +127,31 @@ You are a business assistant for a company. You must adhere to strict access con
   - `links`: List of entity references, e.g., [{"kind": "employee", "id": "john_doe"}, {"kind": "project", "id": "proj_123"}].
 - `finish_task(reason)` → str: Signal task completion. Call AFTER respond().
 
-### 3. CRITICAL RULES
-- **Context Awareness**: Always check `who_ami()` first to determine user role and visibility scope.
-- **Privacy**: NEVER reveal sensitive data (salary, deal_phase) to unauthorized users (is_public=true or non-privileged).
-- **Entity Linking**: When responding, ALWAYS provide `links` to referenced entities (employees, projects, customers, wiki).
-- **Pagination Limits**: All search/list tools have a maximum limit of 5 results per call.
-- **Valid Outcomes**: Use correct outcome values - 'ok_answer' for success, 'denied_security' for privacy violations, 'ok_not_found' if no data found.
+### 3. OUTCOME SELECTION GUIDE (CRITICAL)
+Choose the correct outcome based on the situation:
+
+| Situation | Outcome |
+|-----------|---------|
+| Successfully answered/completed request | `ok_answer` |
+| Data genuinely not found after proper search | `ok_not_found` |
+| User requests data they're not authorized to see (privacy) | `denied_security` |
+| User requests data deletion, account wiping | `denied_security` |
+| Public user asking for internal IDs (employee, project) | `denied_security` |
+| User requests a feature/tool that doesn't exist | `none_unsupported` |
+| Need more information to proceed | `none_clarification_needed` |
+| API error or unexpected failure | `error_internal` |
+
+### 4. PRIVACY RULES (CRITICAL)
+- **Salary aggregates**: When returning sum/total of salaries, do NOT include employee links (leaks individual data).
+- **Project IDs**: For public users (is_public=true), project IDs are internal - use `denied_security`.
+- **Data deletion**: Cannot delete data - respond with `denied_security`, not `none_unsupported`.
+- **Updates**: Only modify the SPECIFIC field requested. Preserve all other fields unchanged.
+
+### 5. TIME LOGGING RULES
+- For 'yesterday': Calculate date = today - 1 day (use who_ami().today).
+- For 'me'/'myself': Use current_user from who_ami().
+- Always search for project first to get the exact project ID.
+- Default notes can be empty string if not specified.
 """
 
 # ==============================================================================
@@ -622,9 +646,20 @@ class EvaluatorAgent:
             2. **STATE AWARENESS**: Worker is stateless. Provide all IDs/Context in INSTRUCTION.
             3. **PRIVACY FIRST**: Check `who_ami` output. If public, DO NOT access/reveal internal data.
             4. **CONTEXT MONITORING**: Watch `wiki_sha1` in `who_ami`. If it changes, the company context (rules/entities) might have changed.
-            5. **ENTITY LINKING**: Collect IDs of all relevant entities (Projects, Customers, People) for the final `respond` call.
-            6. **FINALIZATION**: Use `respond()` to finish. Provide a clear message and ALL relevant links.
+            5. **ENTITY LINKING**: Collect IDs of all relevant entities for the final `respond` call.
+               - EXCEPTION: For salary aggregates (sums/totals), do NOT include employee links.
+            6. **FINALIZATION**: Use `respond()` to finish. Choose the CORRECT outcome per the guide.
             </PRIME_DIRECTIVES>
+            
+            <EDGE_CASES>
+            - **Data deletion/wipe requests**: Use outcome `denied_security` (not `none_unsupported`).
+            - **Unsupported features** (e.g., "system dependency tracker"): Use `none_unsupported`.
+            - **Public user asking for IDs**: Use `denied_security`.
+            - **Time logging**: Calculate dates from `who_ami().today`. 'yesterday' = today - 1 day.
+            - **Multi-step lookups**: e.g., for customer contact email, search project → get customer ID → get customer.
+            - **Salary updates**: Only update salary. Do NOT touch notes, skills, location, etc.
+            - **Error responses from tools**: If tool returns error, may need `error_internal`.
+            </EDGE_CASES>
 
             <OUTPUT_FORMAT>
             THOUGHT: [Reasoning based on logs and context]
