@@ -67,33 +67,67 @@ BENCHMARK_CONTEXT = """
 You are a business assistant for a company. You must adhere to strict access control and privacy rules specific to the current company context.
 
 **A. Access Control**
-- **Executives**: Broad access.
-- **Project Leads**: Can modify their projects.
-- **Team Members**: Read access.
-- **Guests/Public**: PUBLIC DATA ONLY. No internal details (salaries, deal phases).
+- **Executives**: Broad access to all data.
+- **Project Leads**: Can modify projects they lead.
+- **Team Members**: Read access to most data.
+- **Guests/Public (is_public=true)**: PUBLIC DATA ONLY. No internal details (salaries, deal phases, employee IDs).
 
 **B. Key Entities**
-- **Employee**: `id`, `name`, `email`, `salary` (sensitive), `skills`, `wills`.
-- **Project**: `id`, `name`, `customer`, `status`, `team` (allocations).
-- **Customer**: `id`, `name`, `deal_phase` (sensitive), `account_manager`.
-- **TimeEntry**: `id`, `employee`, `project`, `hours`, `billable`, `status`.
+- **Employee**: `id`, `name`, `email`, `salary` (SENSITIVE), `location`, `department`, `skills`, `wills`, `notes`.
+- **Project**: `id`, `name`, `customer`, `status`, `description`, `team` (list of allocations with employee, time_slice, role).
+- **Customer**: `id`, `name`, `brief`, `location`, `deal_phase` (SENSITIVE), `high_level_status`, `account_manager`, `primary_contact_name`, `primary_contact_email`.
+- **TimeEntry**: `id`, `employee`, `customer`, `project`, `date`, `hours`, `work_category`, `notes`, `billable`, `status`.
 - **Wiki**: `path`, `content`.
 
 ### 2. AVAILABLE TOOLS
-The Worker has tools to interact with the system. Key tools include:
-- `who_ami()`: Returns current user context.
-- `search_employees(query, ...)`: Find colleagues.
-- `search_projects(query, ...)`: Find projects.
-- `search_customers(query, ...)`: Find clients.
-- `search_wiki(query_regex)`: Search documentation.
-- `log_time(...)`: Create time entries.
-- `respond(message, outcome, links)`: **FINAL ACTION**. Submit the answer.
+
+**Context Tools:**
+- `who_ami()` → Dict: Returns current user context (current_user, is_public, location, department, today, wiki_sha1).
+
+**Employee Tools:**
+- `list_employees(limit=5, offset=0)` → Dict: List employees with pagination.
+- `search_employees(query, limit=5)` → List[Dict]: Search employees by text.
+- `get_employee(id)` → Dict: Get full employee profile by ID.
+- `update_employee(employee_id, salary, skills, wills, notes)` → Dict: Update employee info.
+
+**Project Tools:**
+- `list_projects(limit=5, offset=0)` → Dict: List projects with pagination.
+- `search_projects(query, limit=5)` → List[Dict]: Search projects by text.
+- `get_project(id)` → Dict: Get detailed project info including team.
+- `update_project_team(project_id, team)` → str: Update project team allocation.
+- `update_project_status(project_id, status)` → str: Update project status.
+
+**Customer Tools:**
+- `list_customers(limit=5, offset=0)` → Dict: List customers with pagination.
+- `search_customers(query, limit=5)` → List[Dict]: Search customers by text.
+- `get_customer(id)` → Dict: Get full customer record.
+
+**Wiki Tools:**
+- `list_wiki()` → Dict: List all wiki article paths.
+- `search_wiki(query_regex)` → List[Dict]: Search wiki articles using regex.
+- `load_wiki(file)` → Dict: Load wiki article content.
+- `update_wiki(file, content)` → str: Create or update wiki page.
+
+**Time Tracking Tools:**
+- `log_time(employee, project, hours, date, notes, billable=True)` → Dict: Log a new time entry.
+- `get_time(id)` → Dict: Get a time entry by ID.
+- `update_time(id, date, hours, notes, billable, status)` → str: Update an existing time entry.
+- `search_time(employee, limit=10)` → List[Dict]: Search time entries for an employee.
+- `time_summary_by_project(date_from, date_to, projects)` → List[Dict]: Get time summary grouped by project.
+- `time_summary_by_employee(date_from, date_to, employees)` → List[Dict]: Get time summary grouped by employee.
+
+**Response Tools:**
+- `respond(message, outcome, links)` → str: **FINAL ACTION**. Submit the answer to the user.
+  - `outcome`: MUST be one of: 'ok_answer', 'ok_not_found', 'denied_security', 'none_clarification_needed', 'none_unsupported', 'error_internal'.
+  - `links`: List of entity references, e.g., [{"kind": "employee", "id": "john_doe"}, {"kind": "project", "id": "proj_123"}].
+- `finish_task(reason)` → str: Signal task completion. Call AFTER respond().
 
 ### 3. CRITICAL RULES
-- **Context Awareness**: Check `who_ami()` to know your role and visibility.
-- **Privacy**: Never reveal sensitive data to unauthorized users.
-- **Entity Linking**: When responding, ALWAYS provide `links` to referenced entities (Projects, Customers, Employees).
-- **Outcome**: Use `ok_answer` for success, `cant_answer` if impossible/unauthorized.
+- **Context Awareness**: Always check `who_ami()` first to determine user role and visibility scope.
+- **Privacy**: NEVER reveal sensitive data (salary, deal_phase) to unauthorized users (is_public=true or non-privileged).
+- **Entity Linking**: When responding, ALWAYS provide `links` to referenced entities (employees, projects, customers, wiki).
+- **Pagination Limits**: All search/list tools have a maximum limit of 5 results per call.
+- **Valid Outcomes**: Use correct outcome values - 'ok_answer' for success, 'denied_security' for privacy violations, 'ok_not_found' if no data found.
 """
 
 # ==============================================================================
@@ -135,6 +169,25 @@ def create_tools(client, logger: ActionLogger):
 
     # --- Employee Tools ---
     @tool
+    def list_employees(limit: int = 5, offset: int = 0) -> Dict[str, Any]:
+        """
+        List employees with pagination.
+
+        Args:
+            limit: Maximum number of employees to return (max 5).
+            offset: Number of employees to skip.
+        """
+        try:
+            req = erc3.Req_ListEmployees(limit=limit, offset=offset)
+            resp = dispatch_and_log(req, "/employees/list")
+            return {
+                "next_offset": resp.next_offset,
+                "employees": [e.model_dump() for e in resp.employees] if resp.employees else []
+            }
+        except ApiException as e:
+            return {"error": str(e)}
+
+    @tool
     def search_employees(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """
         Search employees by text.
@@ -167,6 +220,25 @@ def create_tools(client, logger: ActionLogger):
 
     # --- Project Tools ---
     @tool
+    def list_projects(limit: int = 5, offset: int = 0) -> Dict[str, Any]:
+        """
+        List projects with pagination.
+
+        Args:
+            limit: Maximum number of projects to return (max 5).
+            offset: Number of projects to skip.
+        """
+        try:
+            req = erc3.Req_ListProjects(limit=limit, offset=offset)
+            resp = dispatch_and_log(req, "/projects/list")
+            return {
+                "next_offset": resp.next_offset,
+                "projects": [p.model_dump() for p in resp.projects] if resp.projects else []
+            }
+        except ApiException as e:
+            return {"error": str(e)}
+
+    @tool
     def search_projects(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """
         Search projects by text.
@@ -198,6 +270,25 @@ def create_tools(client, logger: ActionLogger):
             return {"error": str(e)}
 
     # --- Customer Tools ---
+    @tool
+    def list_customers(limit: int = 5, offset: int = 0) -> Dict[str, Any]:
+        """
+        List customers with pagination.
+
+        Args:
+            limit: Maximum number of customers to return (max 5).
+            offset: Number of customers to skip.
+        """
+        try:
+            req = erc3.Req_ListCustomers(limit=limit, offset=offset)
+            resp = dispatch_and_log(req, "/customers/list")
+            return {
+                "next_offset": resp.next_offset,
+                "companies": [c.model_dump() for c in resp.companies] if resp.companies else []
+            }
+        except ApiException as e:
+            return {"error": str(e)}
+
     @tool
     def search_customers(query: str, limit: int = 5) -> List[Dict[str, Any]]:
         """
@@ -500,9 +591,9 @@ def create_tools(client, logger: ActionLogger):
 
     return [
         who_ami, 
-        search_employees, get_employee, update_employee,
-        search_projects, get_project, update_project_team, update_project_status,
-        search_customers, get_customer,
+        list_employees, search_employees, get_employee, update_employee,
+        list_projects, search_projects, get_project, update_project_team, update_project_status,
+        list_customers, search_customers, get_customer,
         list_wiki, search_wiki, load_wiki, update_wiki,
         log_time, get_time, update_time, search_time, time_summary_by_project, time_summary_by_employee,
         respond, finish_task
