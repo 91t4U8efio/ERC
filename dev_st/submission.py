@@ -141,7 +141,7 @@ def create_tools(client, logger: ActionLogger):
 
         Args:
             query: The search query string.
-            limit: Maximum number of results to return.
+            limit: Maximum number of results to return (max 5).
         """
         try:
             req = erc3.Req_SearchEmployees(query=query, limit=limit, offset=0)
@@ -173,7 +173,7 @@ def create_tools(client, logger: ActionLogger):
 
         Args:
             query: The search query string.
-            limit: Maximum number of results to return.
+            limit: Maximum number of results to return (max 5).
         """
         try:
             req = erc3.Req_SearchProjects(query=query, limit=limit, offset=0)
@@ -205,7 +205,7 @@ def create_tools(client, logger: ActionLogger):
 
         Args:
             query: The search query string.
-            limit: Maximum number of results to return.
+            limit: Maximum number of results to return (max 5).
         """
         try:
             req = erc3.Req_SearchCustomers(query=query, limit=limit, offset=0)
@@ -355,7 +355,7 @@ def create_tools(client, logger: ActionLogger):
 
         Args:
             employee: The ID of the employee.
-            limit: Maximum number of entries to return.
+            limit: Maximum number of entries to return (max 5).
         """
         try:
             req = erc3.Req_SearchTimeEntries(employee=employee, limit=limit, offset=0)
@@ -464,7 +464,7 @@ def create_tools(client, logger: ActionLogger):
         Submits the final response for the task.
         Args:
             message: The text response to the user.
-            outcome: 'ok_answer' or 'cant_answer'.
+            outcome: One of 'ok_answer', 'ok_not_found', 'denied_security', 'none_clarification_needed', 'none_unsupported', 'error_internal'.
             links: List of entities referenced, e.g., [{"kind": "employee", "id": "..."}]
         """
         if task_state["completed"]: return "Task already completed."
@@ -476,15 +476,27 @@ def create_tools(client, logger: ActionLogger):
         parsed_links = []
         for l in links:
             if isinstance(l, dict):
-                parsed_links.append(erc3.EntityLink(kind=l.get("kind"), id=l.get("id")))
+                parsed_links.append(erc3.AgentLink(kind=l.get("kind"), id=l.get("id")))
         
         try:
             req = erc3.Req_ProvideAgentResponse(message=message, outcome=outcome, links=parsed_links)
             dispatch_and_log(req, "/respond")
             task_state["completed"] = True
-            return "Response Submitted Successfully."
+            return "Response Submitted Successfully. Task Finished."
         except ApiException as e:
             return f"Error submitting response: {e}"
+
+    @tool
+    def finish_task(reason: str) -> str:
+        """
+        Signals that the task is complete. Call this AFTER calling respond() to end the task loop.
+        
+        Args:
+            reason: Brief explanation of why the task is finished (e.g., 'Response submitted', 'Cannot complete - no data found').
+        """
+        task_state["completed"] = True
+        logger.log(f"[TASK FINISHED] {reason}")
+        return f"Task marked as finished: {reason}"
 
     return [
         who_ami, 
@@ -493,7 +505,7 @@ def create_tools(client, logger: ActionLogger):
         search_customers, get_customer,
         list_wiki, search_wiki, load_wiki, update_wiki,
         log_time, get_time, update_time, search_time, time_summary_by_project, time_summary_by_employee,
-        respond
+        respond, finish_task
     ]
 
 # ==============================================================================
@@ -526,7 +538,7 @@ class EvaluatorAgent:
             <OUTPUT_FORMAT>
             THOUGHT: [Reasoning based on logs and context]
             DECISION: [PROCEED | FINISH]
-            INSTRUCTION: [Specific goal for the Worker]
+            INSTRUCTION: [Specific goal for the Worker in natural language or Python code. DO NOT OUTPUT JSON.]
             </OUTPUT_FORMAT>
         """)
 
@@ -624,14 +636,22 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
         worker_prompt = (
             f"""{BENCHMARK_CONTEXT}
             
+            ROLE:
+            Your job is to write code according to GOAL instruction. 
+            You should do that defined in the GOAL exactly based on the store environment rules above.
+
             GOAL: {instruction}
             
-            PYTHON CODING RULES:
-            1. Output valid Python code in markdown: ```python ... ```
-            2. Use `print()` to log details.
-            3. Use `final_answer('DONE')` to signal completion.
-            4. **FINAL RESPONSE**: If the goal is to answer the user, use the `respond` tool.
-            5. **LINKS**: When using `respond`, construct the `links` list carefully: `[{{"kind": "employee", "id": "..."}}, ...]`.
+            PYTHON CODING RULES (STRICT):
+            1. Output valid Python code in a markdown block: ```python ... ```
+            2. **NO BARE RAISE**: Do not use `raise` without arguments. Use `raise Exception("Context description")`.
+            3. **DEFENSIVE CODING**: When filtering lists, check if the list is empty before accessing index `[0]`.
+            4. Use `print()` to log details for the Evaluator.
+            5. Use `final_answer('DONE')` to signal completion.
+            6. IMPORTANT: Perform ONLY the steps requested in the GOAL. Do NOT assume previous variables exist.
+            7. **FINAL RESPONSE**: If the goal is to answer the user, use the `respond` tool.
+            8. **LINKS**: When using `respond`, construct the `links` list carefully: `[{{"kind": "employee", "id": "..."}}, ...]`.
+            9. **COMPLETION**: After calling `respond`, call `finish_task(reason)` to end the task.
             """
         )
         
@@ -645,9 +665,9 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
             worker_output = captured_io.getvalue()
             print(worker_output, flush=True)
             
-            # Check for completion signal in logs (naive check)
-            if "/respond" in worker_output and "Success" in worker_output:
-                print(">>> Task Completed via respond().")
+            # Check for completion signal in logs
+            if "[TASK FINISHED]" in worker_output or ("/respond" in worker_output and "Task Finished" in worker_output):
+                print(">>> Task Completed.")
                 return "Success"
 
             history.append(f"Evaluator Instruction: {instruction}")
