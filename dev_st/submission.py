@@ -263,17 +263,29 @@ def create_tools(client, logger: ActionLogger):
             return {"error": str(e)}
 
     @tool
-    def search_projects(query: str, limit: int = 5, include_archived: bool = False) -> List[Dict[str, Any]]:
+    def search_projects(query: str, team_member: str = None, limit: int = 5, include_archived: bool = False) -> List[Dict[str, Any]]:
         """
-        Search projects by text.
+        Search projects by text or team member.
 
         Args:
             query: The search query string.
+            team_member: Search for projects where this employee is a member.
             limit: Maximum number of results to return (max 5).
             include_archived: Whether to include archived projects in the search.
         """
         try:
-            req = erc3.Req_SearchProjects(query=query, limit=limit, offset=0, include_archived=include_archived)
+            # Construct dictionary for team filter if member provided
+            team_filter = None
+            if team_member:
+                team_filter = {"employee_id": team_member}
+
+            req = erc3.Req_SearchProjects(
+                query=query, 
+                team=team_filter, 
+                limit=limit, 
+                offset=0, 
+                include_archived=include_archived
+            )
             resp = dispatch_and_log(req, "/projects/search")
             return [p.model_dump() for p in resp.projects] if resp.projects else []
         except ApiException as e:
@@ -517,16 +529,19 @@ def create_tools(client, logger: ActionLogger):
 
     # --- Update Tools ---
     @tool
-    def update_employee(employee_id: str, salary: int, skills: List[Dict[str, Any]], wills: List[Dict[str, Any]], notes: str) -> Dict[str, Any]:
+    def update_employee(employee_id: str, salary: int, skills: List[Dict[str, Any]], wills: List[Dict[str, Any]], notes: str, location: str = None, department: str = None) -> Dict[str, Any]:
         """
-        Update employee info (salary, skills, wills, notes).
+        Update employee info (salary, skills, wills, notes, location, department).
+        IMPORTANT: Fetch the current employee first. Pass existing values for fields you are NOT changing to preserve them.
 
         Args:
             employee_id: The ID of the employee.
-            salary: New salary amount.
+            salary: New (or existing) salary amount.
             skills: List of skill objects with 'name' and 'level'.
             wills: List of will objects with 'name' and 'level'.
-            notes: New notes.
+            notes: New (or existing) notes.
+            location: New (or existing) location.
+            department: New (or existing) department.
         """
         try:
             # Import SkillLevel from the correct location
@@ -537,7 +552,14 @@ def create_tools(client, logger: ActionLogger):
             will_objs = [SkillLevel(**w) for w in wills] if wills else []
             
             req = erc3.Req_UpdateEmployeeInfo(
-                employee=employee_id, salary=salary, skills=skill_objs, wills=will_objs, notes=notes, changed_by=""
+                employee=employee_id, 
+                salary=salary, 
+                skills=skill_objs, 
+                wills=will_objs, 
+                notes=notes, 
+                location=location,
+                department=department,
+                changed_by=""
             )
             resp = dispatch_and_log(req, "/employees/update")
             return resp.employee.model_dump() if resp.employee else {}
