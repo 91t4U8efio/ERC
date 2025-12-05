@@ -263,16 +263,17 @@ def create_tools(client, logger: ActionLogger):
             return {"error": str(e)}
 
     @tool
-    def search_projects(query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def search_projects(query: str, limit: int = 5, include_archived: bool = False) -> List[Dict[str, Any]]:
         """
         Search projects by text.
 
         Args:
             query: The search query string.
             limit: Maximum number of results to return (max 5).
+            include_archived: Whether to include archived projects in the search.
         """
         try:
-            req = erc3.Req_SearchProjects(query=query, limit=limit, offset=0)
+            req = erc3.Req_SearchProjects(query=query, limit=limit, offset=0, include_archived=include_archived)
             resp = dispatch_and_log(req, "/projects/search")
             return [p.model_dump() for p in resp.projects] if resp.projects else []
         except ApiException as e:
@@ -550,10 +551,11 @@ def create_tools(client, logger: ActionLogger):
 
         Args:
             project_id: The ID of the project.
-            team: List of team member objects.
+            team: List of team member objects with 'employee', 'role', 'time_slice'.
         """
         try:
-            team_objs = [erc3.ProjectMember(**m) for m in team]
+            from erc3.erc3.dtos import Workload
+            team_objs = [Workload(**m) for m in team]
             req = erc3.Req_UpdateProjectTeam(id=project_id, team=team_objs, changed_by="")
             dispatch_and_log(req, "/projects/team/update")
             return "Project team updated successfully."
@@ -647,7 +649,7 @@ class EvaluatorAgent:
             
             <PRIME_DIRECTIVES>
             1. **NO CODING**: DO NOT WRITE CODE. Define the *Plan*.
-            2. **STATE AWARENESS**: Worker is stateless. Provide all IDs/Context in INSTRUCTION.
+            2. **STATE AWARENESS**: Worker is stateless and **BLIND** to the Wiki/Context. You must provide **EXACT, COMPREHENSIVE DATA** in INSTRUCTION. Pass all necessary IDs, constants, and values explicitly.
             3. **PRIVACY FIRST**: Check `who_ami` output. If public, DO NOT access/reveal internal data.
             4. **CONTEXT MONITORING**: Watch `wiki_sha1` in `who_ami`. If it changes, the company context (rules/entities) might have changed.
             5. **ENTITY LINKING**: Collect IDs of all relevant entities for the final `respond` call.
@@ -673,6 +675,7 @@ class EvaluatorAgent:
             - **Time logging**: Calculate dates from `who_ami().today`. 'yesterday' = today - 1 day.
             - **Multi-step lookups**: e.g., for customer contact email, search project → get customer ID → get customer.
             - **Salary updates**: Only update salary. Do NOT touch notes, skills, location, etc.
+            - **STOP CONDITION**: If a search/list tool returns `next_offset: -1` or an empty list (e.g., `[]`, `{{"projects": null}}`), it means NO MORE RESULTS. Do NOT retry the same search or loop endlessly. Accept that the item is NOT FOUND and use `ok_not_found` (or `denied_security` if appropriate).
             </EDGE_CASES>
 
             <OUTPUT_FORMAT>
@@ -810,6 +813,7 @@ class WikiAgent:
             response = self.model(messages=[{"role": "user", "content": prompt}])
             extracted = response.content
             print(f"[WikiAgent] Extracted {len(extracted)} chars of relevant info", flush=True)
+            print(f"[WikiAgent] Knowledge Content:\n{textwrap.indent(extracted, '    ')}")
             return extracted
         except Exception as e:
             print(f"[WikiAgent] Extraction error: {e}", flush=True)
@@ -890,6 +894,13 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
         logger.clear()
         
         # Evaluator Step
+        print(f"\n[DEBUG_FLOW] === FULL CONTEXT DUMP ===", flush=True)
+        print(f"[DEBUG_FLOW] User Context:\n{json.dumps(user_context, indent=2, default=str)}")
+        print(f"[DEBUG_FLOW] History ({len(history)} items):")
+        for i, h in enumerate(history):
+            print(f"--- History Item {i+1} ---\n{h}\n---------------------")
+        print(f"[DEBUG_FLOW] ===========================\n", flush=True)
+
         decision_text = evaluator.decide_next_step(history, user_context, last_decision)
         last_decision = decision_text
         
@@ -905,16 +916,18 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
              # But usually the instruction will contain the final action.
              pass
 
-        print(f"\n[Coordinator] GOAL: {instruction}", flush=True)
+        print(f"\n[Coordinator] Instructions: {instruction}", flush=True)
+        print(f"[DEBUG_FLOW] Worker Input -> Instructions: {instruction}")
+        print(f"[DEBUG_FLOW] User Request (Task): {task.task_text}", flush=True)
         
         worker_prompt = (
             f"""{BENCHMARK_CONTEXT}
             
             ROLE:
-            Your job is to write code according to GOAL instruction. 
-            You should do that defined in the GOAL exactly based on the store environment rules above.
+            Your job is to write code according to INSTRUCTIONS. 
+            You should do that defined in the INSTRUCTIONS exactly based on the store environment rules above.
 
-            GOAL: {instruction}
+            INSTRUCTIONS: {instruction}
             
             PYTHON CODING RULES (STRICT):
             1. Output valid Python code in a markdown block: ```python ... ```
@@ -922,14 +935,14 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
             3. **DEFENSIVE CODING**: When filtering lists, check if the list is empty before accessing index `[0]`.
             4. Use `print()` to log details for the Evaluator.
             5. Use `final_answer('DONE')` to signal completion.
-            6. IMPORTANT: Perform ONLY the steps requested in the GOAL. Do NOT assume previous variables exist.
-            7. **FINAL RESPONSE**: If the goal is to answer the user, use the `respond` tool.
+            6. IMPORTANT: Perform ONLY the steps requested in the INSTRUCTIONS. Do NOT assume previous variables exist.
+            7. **FINAL RESPONSE**: If the INSTRUCTIONS is to answer the user, use the `respond` tool.
             8. **LINKS**: When using `respond`, construct the `links` list carefully: `[{{"kind": "employee", "id": "..."}}, ...]`.
             9. **COMPLETION**: After calling `respond`, call `finish_task(reason)` to end the task.
             10. **API ERRORS**: If a tool returns `{{"error": "..."}}` or an exception occurs, use `respond(..., outcome="error_internal", ...)`.
-            11. **SEARCH ARCHIVED**: When searching projects by name, pass `include_archived=True` (note: search_projects does not have this param, use list_projects with pagination instead if needed).
+            11. **SEARCH ARCHIVED**: When searching projects by name, USE `include_archived=True` in `search_projects`.
             12. **PERMISSION CHECK**: Before modifying project status, get the project first and check if current_user is in the team with role "Lead". If not, use `denied_security`.
-            13. **EXECUTE WRITE ACTIONS**: If the GOAL says to UPDATE/LOG/CHANGE something, you MUST call the update/log tool. Fetching data is NOT completing the task.
+            13. **EXECUTE WRITE ACTIONS**: If the INSTRUCTIONS says to UPDATE/LOG/CHANGE something, you MUST call the update/log tool. Fetching data is NOT completing the task.
             14. **NO PREMATURE RESPOND**: Only call respond() AFTER you have completed the requested action. Do NOT call respond() just to report fetched data.
             """
         )
