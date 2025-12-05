@@ -651,15 +651,17 @@ class EvaluatorAgent:
             1. **NO CODING**: DO NOT WRITE CODE. Define the *Plan*.
             2. **STATE AWARENESS**: Worker is stateless and **BLIND** to the Wiki/Context. You must provide **EXACT, COMPREHENSIVE DATA** in INSTRUCTION. Pass all necessary IDs, constants, and values explicitly.
             3. **PRIVACY FIRST**: Check `who_ami` output. If public, DO NOT access/reveal internal data.
-            4. **CONTEXT MONITORING**: Watch `wiki_sha1` in `who_ami`. If it changes, the company context (rules/entities) might have changed.
-            5. **ENTITY LINKING**: Collect IDs of all relevant entities for the final `respond` call.
+            4. **SECURITY CHECK**: Before EVERY request, check `wiki_knowledge` (Rulebook) to verify if `current_user` has permission.
+               - Example: If Rulebook says "Level 3 cannot list projects" and user is Level 3, DO NOT call `list_projects`. Respond `denied_security`.
+            5. **CONTEXT MONITORING**: Watch `wiki_sha1` in `who_ami`. If it changes, the company context (rules/entities) might have changed.
+            6. **ENTITY LINKING**: Collect IDs of all relevant entities for the final `respond` call.
                - EXCEPTION: For salary aggregates (sums/totals), do NOT include employee links.
-            6. **FINALIZATION**: Use `respond()` to finish. Choose the CORRECT outcome per the guide.
-            7. **ONE STEP AT A TIME**: Give the Worker ONE simple action per turn. Do NOT chain multiple steps. 
+            7. **FINALIZATION**: Use `respond()` to finish. Choose the CORRECT outcome per the guide.
+            8. **ONE STEP AT A TIME**: Give the Worker ONE simple action per turn. Do NOT chain multiple steps. 
                - BAD: "1. Search project 2. Get employee 3. Call respond"
                - GOOD: "Search for project 'X' and return the project ID"
                - Next turn you'll get results and give the next step.
-            8. **WRITE ACTIONS**: When task requires UPDATE/LOG/CHANGE:
+            9. **WRITE ACTIONS**: When task requires UPDATE/LOG/CHANGE:
                - First gather required IDs/data (search, get)
                - Then give EXPLICIT instruction: "Call update_employee(employee_id='X', salary=Y, ...)"
                - Fetching data is NOT completing the task. You MUST instruct the actual write call.
@@ -668,7 +670,8 @@ class EvaluatorAgent:
             <EDGE_CASES>
             - **Archived projects**: When searching for projects by name, ALWAYS set `include_archived=True` to find all projects including archived ones.
             - **Unsupported features**: If user requests a tool/feature that doesn't exist in the AVAILABLE TOOLS list (e.g., "system dependency tracker", "dependency graph", custom integrations), immediately use outcome `none_unsupported`. Do NOT try to improvise or work around.
-            - **API errors**: If a tool returns an error response (e.g., `{{"error": "..."}}`, "page limit exceeded", exceptions), use outcome `error_internal`.
+            - **Permission Block**: If a tool returns "page limit exceeded: X > -1", this means ACCESS DENIED. Do NOT retry. Use outcome `denied_security`.
+            - **API errors**: If a tool returns other error responses (e.g., `{{"error": "..."}}`, exceptions), use outcome `error_internal`.
             - **Project status changes**: Only Project Leads can change project status. Before updating, verify the current user is the Lead of that project. If not, use `denied_security`.
             - **Data deletion/wipe requests**: Use outcome `denied_security` (not `none_unsupported`).
             - **Public user asking for IDs**: Use `denied_security`.
