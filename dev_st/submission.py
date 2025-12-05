@@ -418,7 +418,8 @@ def create_tools(client, logger: ActionLogger):
         try:
             req = erc3.Req_LogTimeEntry(
                 employee=employee, project=project, hours=hours, date=date, 
-                notes=notes, billable=billable, work_category="customer_project" # Defaulting for simplicity
+                notes=notes, billable=billable, work_category="customer_project",
+                status="draft", logged_by=employee  # Required fields with defaults
             )
             resp = dispatch_and_log(req, "/time/log")
             return resp.model_dump()
@@ -522,14 +523,17 @@ def create_tools(client, logger: ActionLogger):
         Args:
             employee_id: The ID of the employee.
             salary: New salary amount.
-            skills: List of skill objects.
-            wills: List of will objects.
+            skills: List of skill objects with 'name' and 'level'.
+            wills: List of will objects with 'name' and 'level'.
             notes: New notes.
         """
         try:
-            # Construct proper objects
-            skill_objs = [erc3.Skill(**s) for s in skills]
-            will_objs = [erc3.Will(**w) for w in wills]
+            # Import SkillLevel from the correct location
+            from erc3.erc3.dtos import SkillLevel
+            
+            # Convert dicts to SkillLevel objects
+            skill_objs = [SkillLevel(**s) for s in skills] if skills else []
+            will_objs = [SkillLevel(**w) for w in wills] if wills else []
             
             req = erc3.Req_UpdateEmployeeInfo(
                 employee=employee_id, salary=salary, skills=skill_objs, wills=will_objs, notes=notes, changed_by=""
@@ -649,22 +653,32 @@ class EvaluatorAgent:
             5. **ENTITY LINKING**: Collect IDs of all relevant entities for the final `respond` call.
                - EXCEPTION: For salary aggregates (sums/totals), do NOT include employee links.
             6. **FINALIZATION**: Use `respond()` to finish. Choose the CORRECT outcome per the guide.
+            7. **ONE STEP AT A TIME**: Give the Worker ONE simple action per turn. Do NOT chain multiple steps. 
+               - BAD: "1. Search project 2. Get employee 3. Call respond"
+               - GOOD: "Search for project 'X' and return the project ID"
+               - Next turn you'll get results and give the next step.
+            8. **WRITE ACTIONS**: When task requires UPDATE/LOG/CHANGE:
+               - First gather required IDs/data (search, get)
+               - Then give EXPLICIT instruction: "Call update_employee(employee_id='X', salary=Y, ...)"
+               - Fetching data is NOT completing the task. You MUST instruct the actual write call.
             </PRIME_DIRECTIVES>
             
             <EDGE_CASES>
+            - **Archived projects**: When searching for projects by name, ALWAYS set `include_archived=True` to find all projects including archived ones.
+            - **Unsupported features**: If user requests a tool/feature that doesn't exist in the AVAILABLE TOOLS list (e.g., "system dependency tracker", "dependency graph", custom integrations), immediately use outcome `none_unsupported`. Do NOT try to improvise or work around.
+            - **API errors**: If a tool returns an error response (e.g., `{{"error": "..."}}`, "page limit exceeded", exceptions), use outcome `error_internal`.
+            - **Project status changes**: Only Project Leads can change project status. Before updating, verify the current user is the Lead of that project. If not, use `denied_security`.
             - **Data deletion/wipe requests**: Use outcome `denied_security` (not `none_unsupported`).
-            - **Unsupported features** (e.g., "system dependency tracker"): Use `none_unsupported`.
             - **Public user asking for IDs**: Use `denied_security`.
             - **Time logging**: Calculate dates from `who_ami().today`. 'yesterday' = today - 1 day.
             - **Multi-step lookups**: e.g., for customer contact email, search project → get customer ID → get customer.
             - **Salary updates**: Only update salary. Do NOT touch notes, skills, location, etc.
-            - **Error responses from tools**: If tool returns error, may need `error_internal`.
             </EDGE_CASES>
 
             <OUTPUT_FORMAT>
             THOUGHT: [Reasoning based on logs and context]
             DECISION: [PROCEED | FINISH]
-            INSTRUCTION: [Specific goal for the Worker in natural language or Python code. DO NOT OUTPUT JSON.]
+            INSTRUCTION: [ONE single action for the Worker. Keep it simple - just one API call or one respond call.]
             </OUTPUT_FORMAT>
         """)
 
@@ -690,6 +704,133 @@ class EvaluatorAgent:
         except Exception as e:
             print(f"[Evaluator] Error: {e}", flush=True)
             raise e
+
+# ==============================================================================
+# AGENT 3: THE WIKI AGENT (KNOWLEDGE EXTRACTOR)
+# ==============================================================================
+class WikiAgent:
+    """
+    Agent that searches wiki for relevant content and extracts
+    information relevant to the current user request.
+    Only loads files that are accessible AND relevant.
+    """
+    def __init__(self, model_id: str, dev_client):
+        self.model = LiteLLMModel(
+            model_id=model_id,
+            api_base=os.getenv("NEBIUS_API_BASE"),
+            api_key=os.getenv("NEBIUS_API_KEY")
+        )
+        self.client = dev_client
+    
+    def extract_search_keywords(self, task_description: str) -> List[str]:
+        """Extract key search terms from the task description."""
+        prompt = textwrap.dedent(f"""
+            Extract 3-5 important keywords from this task for searching a company wiki.
+            Focus on: names, projects, topics, actions (salary, time, update, etc.)
+            
+            TASK: {task_description}
+            
+            OUTPUT: Return ONLY the keywords, one per line, no numbering or explanation.
+        """)
+        
+        try:
+            response = self.model(messages=[{"role": "user", "content": prompt}])
+            keywords = [kw.strip() for kw in response.content.strip().split('\n') if kw.strip()]
+            print(f"[WikiAgent] Extracted keywords: {keywords}", flush=True)
+            return keywords
+        except Exception as e:
+            print(f"[WikiAgent] Keyword extraction error: {e}", flush=True)
+            # Fallback: extract simple words from task
+            words = re.findall(r'\b[A-Za-z]{4,}\b', task_description)
+            return list(set(words))[:5]
+    
+    def search_relevant_pages(self, keywords: List[str]) -> set:
+        """Search wiki for pages matching any of the keywords."""
+        relevant_paths = set()
+        
+        # Always include rulebook.md as it contains important rules
+        relevant_paths.add("rulebook.md")
+        
+        for keyword in keywords:
+            try:
+                # Use case-insensitive regex search
+                query_regex = f"(?i){re.escape(keyword)}"
+                results = self.client.dispatch(erc3.Req_SearchWiki(query_regex=query_regex))
+                if results.results:
+                    for r in results.results:
+                        relevant_paths.add(r.path)
+                        print(f"[WikiAgent] Found '{keyword}' in: {r.path}", flush=True)
+            except Exception as e:
+                print(f"[WikiAgent] Search error for '{keyword}': {e}", flush=True)
+        
+        return relevant_paths
+    
+    def fetch_relevant_wiki_content(self, paths: set) -> Dict[str, str]:
+        """Load only the specified wiki pages."""
+        wiki_content = {}
+        for path in paths:
+            try:
+                content = self.client.dispatch(erc3.Req_LoadWiki(file=path))
+                wiki_content[path] = content.content
+                print(f"[WikiAgent] Loaded: {path} ({len(content.content)} chars)", flush=True)
+            except Exception as e:
+                print(f"[WikiAgent] Error loading {path}: {e}", flush=True)
+        return wiki_content
+    
+    def extract_relevant_info(self, task_description: str, wiki_content: Dict[str, str]) -> str:
+        """Use LLM to extract only relevant wiki info for the task."""
+        if not wiki_content:
+            return "No wiki content available."
+        
+        wiki_context = "\n\n".join([
+            f"=== {path} ===\n{content}" 
+            for path, content in wiki_content.items()
+        ])
+        
+        prompt = textwrap.dedent(f"""
+            You are a wiki content filter for a business assistant.
+            Extract ONLY information directly relevant to completing the task.
+            
+            Include relevant:
+            - Company policies or rules that apply
+            - Security/access control rules
+            - Specific people, projects, or customers mentioned
+            - Procedures or guidelines to follow
+            
+            USER TASK: {task_description}
+            
+            WIKI CONTENT:
+            {wiki_context}
+            
+            OUTPUT: Concise summary of relevant info. Say "No relevant wiki information found." if nothing applies.
+        """)
+        
+        print(f"[WikiAgent] Extracting relevant info from {len(wiki_content)} pages...", flush=True)
+        try:
+            response = self.model(messages=[{"role": "user", "content": prompt}])
+            extracted = response.content
+            print(f"[WikiAgent] Extracted {len(extracted)} chars of relevant info", flush=True)
+            return extracted
+        except Exception as e:
+            print(f"[WikiAgent] Extraction error: {e}", flush=True)
+            return f"Error extracting relevant info: {e}"
+    
+    def get_relevant_wiki_knowledge(self, task_description: str) -> str:
+        """Main entry point: search, load relevant pages, extract info."""
+        print(f"[WikiAgent] Analyzing task for relevant wiki content...", flush=True)
+        
+        # Step 1: Extract keywords from task
+        keywords = self.extract_search_keywords(task_description)
+        
+        # Step 2: Search for relevant pages
+        relevant_paths = self.search_relevant_pages(keywords)
+        print(f"[WikiAgent] Found {len(relevant_paths)} relevant pages", flush=True)
+        
+        # Step 3: Load only relevant pages
+        wiki_content = self.fetch_relevant_wiki_content(relevant_paths)
+        
+        # Step 4: Extract relevant info
+        return self.extract_relevant_info(task_description, wiki_content)
 
 # ==============================================================================
 # AGENT 2: THE WORKER (CODE AGENT)
@@ -736,17 +877,12 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
     except Exception as e:
         print(f"[Coordinator] Failed to fetch context: {e}")
 
-    # Pre-load Wiki Rules (rulebook.md)
-    wiki_rules = ""
-    try:
-        rulebook = dev_client.dispatch(erc3.Req_LoadWiki(file="rulebook.md"))
-        wiki_rules = rulebook.content
-        print(f"[Coordinator] Loaded rulebook.md ({len(wiki_rules)} chars)", flush=True)
-    except Exception as e:
-        print(f"[Coordinator] Failed to load rulebook: {e}")
+    # WikiAgent: Search and load only relevant wiki pages
+    wiki_agent = WikiAgent(model_id, dev_client)
+    relevant_wiki = wiki_agent.get_relevant_wiki_knowledge(task.task_text)
     
-    # Add wiki rules to user context for Evaluator
-    user_context["wiki_rules"] = wiki_rules
+    # Add wiki knowledge to user context for Evaluator
+    user_context["wiki_knowledge"] = relevant_wiki
 
     max_turns = 7 
     for turn in range(max_turns):
@@ -790,6 +926,11 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
             7. **FINAL RESPONSE**: If the goal is to answer the user, use the `respond` tool.
             8. **LINKS**: When using `respond`, construct the `links` list carefully: `[{{"kind": "employee", "id": "..."}}, ...]`.
             9. **COMPLETION**: After calling `respond`, call `finish_task(reason)` to end the task.
+            10. **API ERRORS**: If a tool returns `{{"error": "..."}}` or an exception occurs, use `respond(..., outcome="error_internal", ...)`.
+            11. **SEARCH ARCHIVED**: When searching projects by name, pass `include_archived=True` (note: search_projects does not have this param, use list_projects with pagination instead if needed).
+            12. **PERMISSION CHECK**: Before modifying project status, get the project first and check if current_user is in the team with role "Lead". If not, use `denied_security`.
+            13. **EXECUTE WRITE ACTIONS**: If the GOAL says to UPDATE/LOG/CHANGE something, you MUST call the update/log tool. Fetching data is NOT completing the task.
+            14. **NO PREMATURE RESPOND**: Only call respond() AFTER you have completed the requested action. Do NOT call respond() just to report fetched data.
             """
         )
         
@@ -823,7 +964,7 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
 # MAIN
 # ==============================================================================
 def main():
-    MODEL_ID = "nebius/openai/gpt-oss-20b"
+    MODEL_ID = "nebius/openai/gpt-oss-120b"
     
     if "ERC3_API_KEY" not in os.environ:
         print("ERROR: 'ERC3_API_KEY' is missing. Check your .env file.")
