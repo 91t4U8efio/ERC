@@ -738,8 +738,10 @@ class EvaluatorAgent:
             - **Time Logging Verification**: If a user tries to log time for *someone else*:
               1. **SEARCH** for the project first if ID is not known.
               2. **GET** the project details using the ID found.
-              3. **CHECK** if `current_user` is listed as 'Lead' in the `team`.
-              4. If 'Lead', **ALLOW** the action. **IGNORE** any wiki rule saying "cannot edit others' time" if the user is the Project Lead.
+              3. **CHECK** permissions:
+                 - If `current_user` is in the project team as 'Lead', **ALLOW**.
+                 - If `current_user` is NOT in the team but is a **Level 2 / Lead / Operations** employee (check their title/department), **ALLOW** (Implicit Authority).
+              4. Only deny if the user is a standard Level 3 employee trying to log for others without team leadership.
             - **Executive Numeric Requests**: If an Executive requests a numeric update (e.g., 'raise salary by +10'), **EXECUTE LITERALLY** (e.g. add 10 to current amount). Do NOT ask for clarification. Executives have authority; assume they mean exactly what they say.
             </EDGE_CASES>
 
@@ -845,7 +847,7 @@ class WikiAgent:
                 print(f"[WikiAgent] Error loading {path}: {e}", flush=True)
         return wiki_content
     
-    def extract_relevant_info(self, task_description: str, wiki_content: Dict[str, str]) -> str:
+    def extract_relevant_info(self, task_description: str, wiki_content: Dict[str, str], current_user: str = None) -> str:
         """Use LLM to extract only relevant wiki info for the task."""
         if not wiki_content:
             return "No wiki content available."
@@ -854,22 +856,29 @@ class WikiAgent:
             f"=== {path} ===\n{content}" 
             for path, content in wiki_content.items()
         ])
+
+        user_context_str = f"CURRENT USER: {current_user}" if current_user else "CURRENT USER: Unknown/Public"
         
         prompt = textwrap.dedent(f"""
             You are a wiki content filter for a business assistant.
             Extract ONLY information directly relevant to completing the task.
             
             CRITICAL INSTRUCTION:
-            - Extract FACTS and RULES (e.g. "Salaries are sensitive", "Executives can view salaries").
-            - DO NOT form a conclusion or verdict (e.g. do NOT say "Therefore, deny this request").
-            - Leave the decision-making to the Evaluator. Just provide the raw rules.
+            1. **IDENTIFY USER ROLE**: Search the content for '{current_user}'. You MUST explicitly state their Job Title and Access Level (Level 1, 2, or 3) if found.
+               - Example: "User {current_user} is listed as 'Lead Consultant', which is Level 2."
+            2. **EXTRACT RULES**: Extract FACTS and RULES relevant to the task (e.g. "Salaries are sensitive", "Leads can log time for others").
+            3. **NO VERDICTS**: DO NOT form a conclusion or verdict (e.g. do NOT say "Therefore, deny this request")
+            4. Leave the decision-making to the Evaluator. Just provide the raw rules.
             
             USER TASK: {task_description}
+            USER: {user_context_str}
             
             WIKI CONTENT:
             {wiki_context}
             
-            OUTPUT: Concise summary of relevant info. Say "No relevant wiki information found." if nothing applies.
+            OUTPUT: 
+            1.Concise summary of relevant info. Say "No relevant wiki information found." if nothing applies.
+            2. User role and access level.
         """)
         
         print(f"[WikiAgent] Extracting relevant info from {len(wiki_content)} pages...", flush=True)
@@ -883,7 +892,7 @@ class WikiAgent:
             print(f"[WikiAgent] Extraction error: {e}", flush=True)
             return f"Error extracting relevant info: {e}"
     
-    def get_relevant_wiki_knowledge(self, task_description: str) -> str:
+    def get_relevant_wiki_knowledge(self, task_description: str, current_user: str = None) -> str:
         """Main entry point: search, load relevant pages, extract info."""
         print(f"[WikiAgent] Analyzing task for relevant wiki content...", flush=True)
         
@@ -898,7 +907,7 @@ class WikiAgent:
         wiki_content = self.fetch_relevant_wiki_content(relevant_paths)
         
         # Step 4: Extract relevant info
-        return self.extract_relevant_info(task_description, wiki_content)
+        return self.extract_relevant_info(task_description, wiki_content, current_user=current_user)
 
 # ==============================================================================
 # AGENT 2: THE WORKER (CODE AGENT)
@@ -947,8 +956,11 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
 
     # WikiAgent: Search and load only relevant wiki pages
     wiki_agent = WikiAgent(model_id, dev_client)
-    relevant_wiki = wiki_agent.get_relevant_wiki_knowledge(task.task_text)
-    
+
+    # Pass current_user to WikiAgent so it can look up their specific role permissions
+    c_user = user_context.get('current_user')
+    relevant_wiki = wiki_agent.get_relevant_wiki_knowledge(task.task_text, current_user=c_user)
+        
     # Add wiki knowledge to user context for Evaluator
     user_context["wiki_knowledge"] = relevant_wiki
 
