@@ -725,7 +725,7 @@ class EvaluatorAgent:
             - **Unsupported features**: If user requests a tool/feature that doesn't exist in the AVAILABLE TOOLS list (e.g., "system dependency tracker", "dependency graph", custom integrations), immediately use outcome `none_unsupported`. Do NOT try to improvise or work around.
             - **Permission Block**: If a tool returns "page limit exceeded: X > -1", this means ACCESS DENIED. Do NOT retry. Use outcome `error_internal` or find a filtered alternative (e.g., search own data).
             - **API errors**: If a tool returns other error responses (e.g., `{{"error": "..."}}`, exceptions), use outcome `error_internal`.
-            - **Project status changes**: Only Project Leads can change project status. Before updating, verify the current user is the Lead of that project. If not, use `denied_security`.
+            - **Project status changes (Archiving/Pausing)**: Changing status to 'archived' or 'paused' is a standard lifecycle management task, NOT a destructive action. **Project Leads** have permission to do this. Do NOT require executive approval if the user is the Lead. Verify Lead status via `get_project` then PROCEED.
             - **Data deletion/wipe requests**: Use outcome `denied_security` (not `none_unsupported`).
             - **Public user asking for IDs**: Use `denied_security`.
             - **Time logging**: Calculate dates from `who_ami().today`. 'yesterday' = today - 1 day.
@@ -739,7 +739,7 @@ class EvaluatorAgent:
               1. **SEARCH** for the project first if ID is not known.
               2. **GET** the project details using the ID found.
               3. **CHECK** if `current_user` is listed as 'Lead' in the `team`.
-              4. If 'Lead', **ALLOW** the action. Do NOT deny based on general level alone.
+              4. If 'Lead', **ALLOW** the action. **IGNORE** any wiki rule saying "cannot edit others' time" if the user is the Project Lead.
             - **Executive Numeric Requests**: If an Executive requests a numeric update (e.g., 'raise salary by +10'), **EXECUTE LITERALLY** (e.g. add 10 to current amount). Do NOT ask for clarification. Executives have authority; assume they mean exactly what they say.
             </EDGE_CASES>
 
@@ -1013,6 +1013,7 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
             14. **NO PREMATURE RESPOND**: If the instruction implies a multi-step process (e.g. "Search then Update"), and you have only finished the "Search" part, do NOT call `respond`. Just print the results. Only call `respond` when the actual database change (Update/Log) is complete.
             15. **VERIFY GOAL**: Before calling `respond`, ask yourself: "Did I actually perform the action (Update/Log) requested, or did I just find the data?"
             16. **TRUST PROVIDED IDS**: If the INSTRUCTIONS contain a specific ID (e.g., 'proj_123', 'emp_456'), USE IT DIRECTLY in the tool call. Do NOT search for it again. Do NOT validate it. The Evaluator has already done that.
+            17. **MEANING OF 'RETURN RESULTS'**: When the instruction says "return the results" or "return the context", it means **PRINT THEM** (using `print()`). It does **NOT** mean call `respond()`. Only call `respond()` if the instruction explicitly says "Answer the user" or "Respond to the user".
             """
         )
         
