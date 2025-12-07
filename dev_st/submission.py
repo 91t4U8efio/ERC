@@ -732,6 +732,10 @@ class EvaluatorAgent:
             - **Project Links**: When answering questions about a specific project, **ALWAYS** include the project ID in the `links` list of the `respond` call.
             - **Operations Override**: If a time logging request fails permissions check, check if the user is in "Operations" or "Executive" department. They often have override access.
             - **STOP CONDITION**: If a search/list tool returns `next_offset: -1` or an empty list (e.g., `[]`, `{{"projects": null}}`), it means NO MORE RESULTS. Do NOT retry the same search or loop endlessly. Accept that the item is NOT FOUND and use `ok_not_found` (or `denied_security` if appropriate).
+            - **Time Logging Permissions**: 
+               - Level 3 (Standard): Can ONLY log time for 'me' (themselves).
+               - Level 2 (Leads/Ops) & Level 1 (Execs): Can log time for ANYONE. 
+               - If current_user is Level 2/1, ALLOW logging for others.
             </EDGE_CASES>
 
             <OUTPUT_FORMAT>
@@ -850,11 +854,10 @@ class WikiAgent:
             You are a wiki content filter for a business assistant.
             Extract ONLY information directly relevant to completing the task.
             
-            Include relevant:
-            - Company policies or rules that apply
-            - Security/access control rules
-            - Specific people, projects, or customers mentioned
-            - Procedures or guidelines to follow
+            CRITICAL INSTRUCTION:
+            - Extract FACTS and RULES (e.g. "Salaries are sensitive", "Executives can view salaries").
+            - DO NOT form a conclusion or verdict (e.g. do NOT say "Therefore, deny this request").
+            - Leave the decision-making to the Evaluator. Just provide the raw rules.
             
             USER TASK: {task_description}
             
@@ -1002,7 +1005,9 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
             11. **SEARCH ARCHIVED**: When searching projects by name, USE `include_archived=True` in `search_projects`.
             12. **PERMISSION CHECK**: Before modifying project status, get the project first and check if current_user is in the team with role "Lead". If not, use `denied_security`.
             13. **EXECUTE WRITE ACTIONS**: If the INSTRUCTIONS says to UPDATE/LOG/CHANGE something, you MUST call the update/log tool. Fetching data is NOT completing the task.
-            14. **NO PREMATURE RESPOND**: Only call respond() AFTER you have completed the requested action. Do NOT call respond() just to report fetched data.
+            14. **NO PREMATURE RESPOND**: If the instruction implies a multi-step process (e.g. "Search then Update"), and you have only finished the "Search" part, do NOT call `respond`. Just print the results. Only call `respond` when the actual database change (Update/Log) is complete.
+            15. **VERIFY GOAL**: Before calling `respond`, ask yourself: "Did I actually perform the action (Update/Log) requested, or did I just find the data?"
+            16. **TRUST PROVIDED IDS**: If the INSTRUCTIONS contain a specific ID (e.g., 'proj_123', 'emp_456'), USE IT DIRECTLY in the tool call. Do NOT search for it again. Do NOT validate it. The Evaluator has already done that.
             """
         )
         
