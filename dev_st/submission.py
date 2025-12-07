@@ -732,10 +732,8 @@ class EvaluatorAgent:
             - **Project Links**: When answering questions about a specific project, **ALWAYS** include the project ID in the `links` list of the `respond` call.
             - **Operations Override**: If a time logging request fails permissions check, check if the user is in "Operations" or "Executive" department. They often have override access.
             - **STOP CONDITION**: If a search/list tool returns `next_offset: -1` or an empty list (e.g., `[]`, `{{"projects": null}}`), it means NO MORE RESULTS. Do NOT retry the same search or loop endlessly. Accept that the item is NOT FOUND and use `ok_not_found` (or `denied_security` if appropriate).
-            - **Time Logging Permissions**: 
-               - Level 3 (Standard): Can ONLY log time for 'me' (themselves).
-               - Level 2 (Leads/Ops) & Level 1 (Execs): Can log time for ANYONE. 
-               - If current_user is Level 2/1, ALLOW logging for others.
+            - **Time Logging Verification**: If a user tries to log time for *someone else*, do NOT deny immediately based on general level. **ALWAYS call `get_project` first** to check if `current_user` is the 'Lead' in the `team` list. If yes, ALLOW it.
+            - **Executive Numeric Requests**: If an Executive requests a numeric update (e.g., 'raise salary by +10'), **EXECUTE LITERALLY** (e.g. add 10 to current amount). Do NOT ask for clarification. Executives have authority; assume they mean exactly what they say.
             </EDGE_CASES>
 
             <OUTPUT_FORMAT>
