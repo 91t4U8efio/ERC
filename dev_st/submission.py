@@ -89,8 +89,8 @@ You are a business assistant for a company. You must adhere to strict access con
 - `list_employees(limit=5, offset=0)` → Dict: List employees with pagination.
 - `search_employees(query, limit=5)` → List[Dict]: Search employees by text.
 - `get_employee(id)` → Dict: Get full employee profile by ID.
-- `update_employee(employee_id, salary, skills, wills, notes)` → Dict: Update employee info.
-  - **CAUTION**: Only update the SPECIFIC field requested. Do NOT change other fields.
+- `update_employee(employee_id, salary=None, skills=None, wills=None, notes=None)` → Dict: Update employee info.
+  - **SMART UPDATE**: This tool fetches the current record first. You only need to provide the fields you want to CHANGE. Pass `None` (or omit) for fields that should stay the same.
 
 **Project Tools:**
 - `list_projects(limit=5, offset=0)` → Dict: List projects with pagination.
@@ -138,8 +138,9 @@ Choose the correct outcome based on the situation:
 | User requests data deletion, account wiping | `denied_security` |
 | Public user asking for internal IDs (employee, project) | `denied_security` |
 | User requests a feature/tool that doesn't exist | `none_unsupported` |
+| Ambiguous query (e.g., "cool project") | `none_clarification_needed` |
 | Need more information to proceed | `none_clarification_needed` |
-| API error or unexpected failure | `error_internal` |
+| API error (not auth related) or unexpected failure | `error_internal` |
 
 ### 4. PRIVACY RULES (CRITICAL)
 - **Salary aggregates**: When returning sum/total of salaries, do NOT include employee links (leaks individual data).
@@ -263,21 +264,21 @@ def create_tools(client, logger: ActionLogger):
             return {"error": str(e)}
 
     @tool
-    def search_projects(query: str, team_member: str = None, limit: int = 5, include_archived: bool = False) -> List[Dict[str, Any]]:
+    def search_projects(query: str, team: str = None, limit: int = 5, include_archived: bool = False) -> List[Dict[str, Any]]:
         """
         Search projects by text or team member.
 
         Args:
             query: The search query string.
-            team_member: Search for projects where this employee is a member.
+            team: Search for projects where this employee is a member (provide employee ID).
             limit: Maximum number of results to return (max 5).
             include_archived: Whether to include archived projects in the search.
         """
         try:
             # Construct dictionary for team filter if member provided
             team_filter = None
-            if team_member:
-                team_filter = {"employee_id": team_member}
+            if team:
+                team_filter = {"employee_id": team}
 
             req = erc3.Req_SearchProjects(
                 query=query, 
@@ -362,7 +363,7 @@ def create_tools(client, logger: ActionLogger):
     def list_wiki() -> Dict[str, Any]:
         """List all wiki article paths."""
         try:
-            req = erc3.Req_ListWikiPages()
+            req = erc3.Req_ListWiki()
             resp = dispatch_and_log(req, "/wiki/list")
             return resp.model_dump()
         except ApiException as e:
@@ -377,7 +378,7 @@ def create_tools(client, logger: ActionLogger):
             query_regex: The regex pattern to search for in wiki pages.
         """
         try:
-            req = erc3.Req_SearchWikiPages(query_regex=query_regex)
+            req = erc3.Req_SearchWiki(query_regex=query_regex)
             resp = dispatch_and_log(req, "/wiki/search")
             return [r.model_dump() for r in resp.results] if resp.results else []
         except ApiException as e:
@@ -392,7 +393,7 @@ def create_tools(client, logger: ActionLogger):
             file: The path of the wiki file to load.
         """
         try:
-            req = erc3.Req_LoadWikiPage(file=file)
+            req = erc3.Req_LoadWiki(file=file)
             resp = dispatch_and_log(req, "/wiki/load")
             return resp.model_dump()
         except ApiException as e:
@@ -529,36 +530,55 @@ def create_tools(client, logger: ActionLogger):
 
     # --- Update Tools ---
     @tool
-    def update_employee(employee_id: str, salary: int, skills: List[Dict[str, Any]], wills: List[Dict[str, Any]], notes: str, location: str = None, department: str = None) -> Dict[str, Any]:
+    def update_employee(employee_id: str, salary: Optional[int] = None, skills: Optional[List[Dict[str, Any]]] = None, wills: Optional[List[Dict[str, Any]]] = None, notes: Optional[str] = None, location: Optional[str] = None, department: Optional[str] = None) -> Dict[str, Any]:
         """
-        Update employee info (salary, skills, wills, notes, location, department).
-        IMPORTANT: Fetch the current employee first. Pass existing values for fields you are NOT changing to preserve them.
-
+        Update employee info. Fetches current info first and only updates fields that are provided (not None).
+        
         Args:
             employee_id: The ID of the employee.
-            salary: New (or existing) salary amount.
+            salary: New salary amount.
             skills: List of skill objects with 'name' and 'level'.
             wills: List of will objects with 'name' and 'level'.
-            notes: New (or existing) notes.
-            location: New (or existing) location.
-            department: New (or existing) department.
+            notes: New notes.
+            location: New location.
+            department: New department.
         """
         try:
-            # Import SkillLevel from the correct location
+            # 1. Fetch current employee to merge
+            get_req = erc3.Req_GetEmployee(id=employee_id)
+            get_resp = client.dispatch(get_req)
+            if not get_resp.employee:
+                 return {"error": f"Employee {employee_id} not found."}
+            
+            curr = get_resp.employee
+
+            # 2. Merge values
+            new_salary = salary if salary is not None else curr.salary
+            new_notes = notes if notes is not None else curr.notes
+            new_location = location if location is not None else curr.location
+            new_department = department if department is not None else curr.department
+
             from erc3.erc3.dtos import SkillLevel
             
-            # Convert dicts to SkillLevel objects
-            skill_objs = [SkillLevel(**s) for s in skills] if skills else []
-            will_objs = [SkillLevel(**w) for w in wills] if wills else []
+            # Handle list objects
+            if skills is not None:
+                new_skills = [SkillLevel(**s) for s in skills]
+            else:
+                new_skills = curr.skills
+
+            if wills is not None:
+                new_wills = [SkillLevel(**w) for w in wills]
+            else:
+                new_wills = curr.wills
             
             req = erc3.Req_UpdateEmployeeInfo(
                 employee=employee_id, 
-                salary=salary, 
-                skills=skill_objs, 
-                wills=will_objs, 
-                notes=notes, 
-                location=location,
-                department=department,
+                salary=new_salary, 
+                skills=new_skills, 
+                wills=new_wills, 
+                notes=new_notes, 
+                location=new_location,
+                department=new_department,
                 changed_by=""
             )
             resp = dispatch_and_log(req, "/employees/update")
@@ -674,7 +694,7 @@ class EvaluatorAgent:
             2. **STATE AWARENESS**: Worker is stateless and **BLIND** to the Wiki/Context. You must provide **EXACT, COMPREHENSIVE DATA** in INSTRUCTION. Pass all necessary IDs, constants, and values explicitly.
             3. **PRIVACY FIRST**: Check `who_ami` output. If public, DO NOT access/reveal internal data.
             4. **SECURITY CHECK**: Before EVERY request, check `wiki_knowledge` (Rulebook) to verify if `current_user` has permission.
-               - Example: If Rulebook says "Level 3 cannot list projects" and user is Level 3, DO NOT call `list_projects`. Respond `denied_security`.
+               - Example: If Rulebook says "Level 3 cannot list projects" and user is Level 3, DO NOT call `list_projects`. Respond `denied_security` or use `search_projects(team=current_user)`.
             5. **CONTEXT MONITORING**: Watch `wiki_sha1` in `who_ami`. If it changes, the company context (rules/entities) might have changed.
             6. **ENTITY LINKING**: Collect IDs of all relevant entities for the final `respond` call.
                - EXCEPTION: For salary aggregates (sums/totals), do NOT include employee links.
@@ -690,9 +710,17 @@ class EvaluatorAgent:
             </PRIME_DIRECTIVES>
             
             <EDGE_CASES>
+            - **Limit Exceeded / Access Block**: If a tool returns "page limit exceeded: X > -1", this indicates the endpoint is DISABLED for this user due to access rights.
+              - **DO NOT** retry with smaller limits.
+              - **FIX**: Switch to a filtered tool immediately (e.g., `search_projects(team=user_id)`).
+              - **IF FAILURE PERSISTS**: Treat as API limitation, not strictly security. Use outcome `error_internal`.
+            - **"Not Found" on WRITE Actions**: If you search for an entity to UPDATE it (e.g., "Change status of Project X") and the search returns nothing:
+              - **DO NOT** return `ok_not_found`.
+              - **ASSUME** the user lacks permission to see it.
+              - **RETURN**: `denied_security`.
             - **Archived projects**: When searching for projects by name, ALWAYS set `include_archived=True` to find all projects including archived ones.
             - **Unsupported features**: If user requests a tool/feature that doesn't exist in the AVAILABLE TOOLS list (e.g., "system dependency tracker", "dependency graph", custom integrations), immediately use outcome `none_unsupported`. Do NOT try to improvise or work around.
-            - **Permission Block**: If a tool returns "page limit exceeded: X > -1", this means ACCESS DENIED. Do NOT retry. Use outcome `denied_security`.
+            - **Permission Block**: If a tool returns "page limit exceeded: X > -1", this means ACCESS DENIED. Do NOT retry. Use outcome `error_internal` or find a filtered alternative (e.g., search own data).
             - **API errors**: If a tool returns other error responses (e.g., `{{"error": "..."}}`, exceptions), use outcome `error_internal`.
             - **Project status changes**: Only Project Leads can change project status. Before updating, verify the current user is the Lead of that project. If not, use `denied_security`.
             - **Data deletion/wipe requests**: Use outcome `denied_security` (not `none_unsupported`).
@@ -700,6 +728,9 @@ class EvaluatorAgent:
             - **Time logging**: Calculate dates from `who_ami().today`. 'yesterday' = today - 1 day.
             - **Multi-step lookups**: e.g., for customer contact email, search project → get customer ID → get customer.
             - **Salary updates**: Only update salary. Do NOT touch notes, skills, location, etc.
+            - **Ambiguous Queries**: If the query is subjective (e.g., "cool project", "best employee") and cannot be resolved with certainty, use outcome `none_clarification_needed`. Do NOT guess.
+            - **Project Links**: When answering questions about a specific project, **ALWAYS** include the project ID in the `links` list of the `respond` call.
+            - **Operations Override**: If a time logging request fails permissions check, check if the user is in "Operations" or "Executive" department. They often have override access.
             - **STOP CONDITION**: If a search/list tool returns `next_offset: -1` or an empty list (e.g., `[]`, `{{"projects": null}}`), it means NO MORE RESULTS. Do NOT retry the same search or loop endlessly. Accept that the item is NOT FOUND and use `ok_not_found` (or `denied_security` if appropriate).
             </EDGE_CASES>
 
@@ -964,7 +995,10 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
             7. **FINAL RESPONSE**: If the INSTRUCTIONS is to answer the user, use the `respond` tool.
             8. **LINKS**: When using `respond`, construct the `links` list carefully: `[{{"kind": "employee", "id": "..."}}, ...]`.
             9. **COMPLETION**: After calling `respond`, call `finish_task(reason)` to end the task.
-            10. **API ERRORS**: If a tool returns `{{"error": "..."}}` or an exception occurs, use `respond(..., outcome="error_internal", ...)`.
+            10. **API ERRORS**: If a tool returns `{{"error": "..."}}` or an exception occurs:
+               - Do NOT assume the data is empty. 
+               - Do NOT report "ok_not_found".
+               - Report the error via `error_internal` outcome in `respond()`.
             11. **SEARCH ARCHIVED**: When searching projects by name, USE `include_archived=True` in `search_projects`.
             12. **PERMISSION CHECK**: Before modifying project status, get the project first and check if current_user is in the team with role "Lead". If not, use `denied_security`.
             13. **EXECUTE WRITE ACTIONS**: If the INSTRUCTIONS says to UPDATE/LOG/CHANGE something, you MUST call the update/log tool. Fetching data is NOT completing the task.
