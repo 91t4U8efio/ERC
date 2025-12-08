@@ -713,36 +713,17 @@ class EvaluatorAgent:
             </PRIME_DIRECTIVES>
             
             <EDGE_CASES>
+            - **Search**: Provide the Worker with the correct set of keywords to search for:
+                - User can provide redundant keywords in titles like addressing Mr. or Frau or common words (project, team).
+                - User can provide misspelled keywords (e.g., "Garmany" instead of "Germany").
+            - **Executive Numeric Requests**: If an Executive requests a numeric update (e.g., 'raise salary by +10'), **EXECUTE LITERALLY**.
+            - **Ambiguous Queries**: If the query is subjective (e.g., "cool project", "best employee") and cannot be resolved with certainty, use outcome `none_clarification_needed`.
             - **Limit Exceeded / Access Block**: If a tool returns "page limit exceeded: X > -1", this indicates the endpoint is DISABLED for this user due to access rights.
-              - **DO NOT** retry with smaller limits.
-              - **FIX**: Switch to a filtered tool immediately (e.g., `search_projects(team=user_id)`).
-              - **IF FAILURE PERSISTS**: Treat as API limitation, not strictly security. Use outcome `error_internal`.
-            - **"Not Found" on WRITE Actions**: If you search for an entity to UPDATE it (e.g., "Change status of Project X") and the search returns nothing:
-              - **DO NOT** return `ok_not_found`.
-              - **ASSUME** the user lacks permission to see it.
-              - **RETURN**: `denied_security`.
-            - **Archived projects**: When searching for projects by name, ALWAYS set `include_archived=True` to find all projects including archived ones.
-            - **Unsupported features**: If user requests a tool/feature that doesn't exist in the AVAILABLE TOOLS list (e.g., "system dependency tracker", "dependency graph", custom integrations), immediately use outcome `none_unsupported`. Do NOT try to improvise or work around.
-            - **Permission Block**: If a tool returns "page limit exceeded: X > -1", this means ACCESS DENIED. Do NOT retry. Use outcome `error_internal` or find a filtered alternative (e.g., search own data).
-            - **API errors**: If a tool returns other error responses (e.g., `{{"error": "..."}}`, exceptions), use outcome `error_internal`.
-            - **Project status changes (Archiving/Pausing)**: Changing status to 'archived' or 'paused' is a standard lifecycle management task, NOT a destructive action. **Project Leads** have permission to do this. Do NOT require executive approval if the user is the Lead. Verify Lead status via `get_project` then PROCEED.
-            - **Data deletion/wipe requests**: Use outcome `denied_security` (not `none_unsupported`).
-            - **Public user asking for IDs**: Use `denied_security`.
+                - **FIX**: Switch to a filtered tool immediately (e.g., `search_projects(team=user_id)`).
+            - **Archived projects**: When searching for projects by name, ALWAYS set `include_archived=True`.
             - **Time logging**: Calculate dates from `who_ami().today`. 'yesterday' = today - 1 day.
-            - **Multi-step lookups**: e.g., for customer contact email, search project → get customer ID → get customer.
-            - **Salary updates**: Only update salary. Do NOT touch notes, skills, location, etc.
-            - **Ambiguous Queries**: If the query is subjective (e.g., "cool project", "best employee") and cannot be resolved with certainty, use outcome `none_clarification_needed`. Do NOT guess.
-            - **Project Links**: When answering questions about a specific project, **ALWAYS** include the project ID in the `links` list of the `respond` call.
-            - **Operations Override**: If a time logging request fails permissions check, check if the user is in "Operations" or "Executive" department. They often have override access.
-            - **STOP CONDITION**: If a search/list tool returns `next_offset: -1` or an empty list (e.g., `[]`, `{{"projects": null}}`), it means NO MORE RESULTS. Do NOT retry the same search or loop endlessly. Accept that the item is NOT FOUND and use `ok_not_found` (or `denied_security` if appropriate).
-            - **Time Logging Verification**: If a user tries to log time for *someone else*:
-              1. **SEARCH** for the project first if ID is not known.
-              2. **GET** the project details using the ID found.
-              3. **CHECK** permissions:
-                 - If `current_user` is in the project team as 'Lead', **ALLOW**.
-                 - If `current_user` is NOT in the team but is a **Level 2 / Lead / Operations** employee (check their title/department), **ALLOW** (Implicit Authority).
-              4. Only deny if the user is a standard Level 3 employee trying to log for others without team leadership.
-            - **Executive Numeric Requests**: If an Executive requests a numeric update (e.g., 'raise salary by +10'), **EXECUTE LITERALLY** (e.g. add 10 to current amount). Do NOT ask for clarification. Executives have authority; assume they mean exactly what they say.
+            - **Project Links**: When answering questions about a specific project, **ALWAYS** include the project ID in the `links` list.
+            - **Stop Condition**: If a search returns empty, **RETRY** with broader terms or client-side filtering logic before giving up.
             </EDGE_CASES>
 
             <OUTPUT_FORMAT>
@@ -1024,8 +1005,9 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
             13. **EXECUTE WRITE ACTIONS**: If the INSTRUCTIONS says to UPDATE/LOG/CHANGE something, you MUST call the update/log tool. Fetching data is NOT completing the task.
             14. **NO PREMATURE RESPOND**: If the instruction implies a multi-step process (e.g. "Search then Update"), and you have only finished the "Search" part, do NOT call `respond`. Just print the results. Only call `respond` when the actual database change (Update/Log) is complete.
             15. **VERIFY GOAL**: Before calling `respond`, ask yourself: "Did I actually perform the action (Update/Log) requested, or did I just find the data?"
-            16. **TRUST PROVIDED IDS**: If the INSTRUCTIONS contain a specific ID (e.g., 'proj_123', 'emp_456'), USE IT DIRECTLY in the tool call. Do NOT search for it again. Do NOT validate it. The Evaluator has already done that.
-            17. **MEANING OF 'RETURN RESULTS'**: When the instruction says "return the results" or "return the context", it means **PRINT THEM** (using `print()`). It does **NOT** mean call `respond()`. Only call `respond()` if the instruction explicitly says "Answer the user" or "Respond to the user".
+            16. **TRUST PROVIDED IDS**: If the INSTRUCTIONS contain a specific ID (e.g., 'proj_123', 'emp_456'), USE IT DIRECTLY in the tool call. Do NOT search for it again.
+            17. **MEANING OF 'RETURN RESULTS'**: When the instruction says "return the results" or "return the context", it means **PRINT THEM** (using `print()`).
+            18. **LOOPS & BATCHING**: You are ENCOURAGED to use Python loops to iterate through data (e.g., 'for p in projects: ...') to perform bulk updates, filtering, or processing efficiently.
             """
         )
         
