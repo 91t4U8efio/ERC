@@ -1069,7 +1069,7 @@ def main():
     try:
         core = ERC3()
         res = core.start_session(
-            benchmark="erc3-dev",
+            benchmark="erc3-test",
             workspace="my",
             name="dev_agent_dual_v1",
             architecture="Evaluator-Worker Dual Agent"
