@@ -151,7 +151,6 @@ Choose the correct outcome based on the situation:
 ### 5. TIME LOGGING RULES
 - For 'yesterday': Calculate date = today - 1 day (use who_ami().today).
 - For 'me'/'myself': Use current_user from who_ami().
-- Always search for project first to get the exact project ID.
 - Default notes can be empty string if not specified.
 """
 
@@ -688,8 +687,9 @@ class EvaluatorAgent:
             You direct a **Worker Agent** (The Hands) who executes Python code.
             
             {BENCHMARK_CONTEXT}
-            
-            <PRIME_DIRECTIVES>
+
+            <PRIME DIRECTIVES>
+            0. MAIN REASONING LOOP IS MANDATORY. DO NOT SKIP IT.
             1. **NO CODING**: DO NOT WRITE CODE. Define the *Plan*.
             2. **STATE AWARENESS**: Worker is stateless and **BLIND** to the Wiki/Context. You must provide **EXACT, COMPREHENSIVE DATA** in INSTRUCTION. Pass all necessary IDs, constants, and values explicitly.
             3. **PRIVACY FIRST**: Check `who_ami` output. If public, DO NOT access/reveal internal data.
@@ -698,7 +698,9 @@ class EvaluatorAgent:
             5. **CONTEXT MONITORING**: Watch `wiki_sha1` in `who_ami`. If it changes, the company context (rules/entities) might have changed.
             6. **ENTITY LINKING**: Collect IDs of all relevant entities for the final `respond` call.
                - EXCEPTION: For salary aggregates (sums/totals), do NOT include employee links.
-            7. **FINALIZATION**: Use `respond()` to finish. Choose the CORRECT outcome per the guide.
+            7. **FINALIZATION**: Use `respond()` to finish:
+               - Choose the CORRECT outcome per the guide.
+               - **FORBIDDEN**: Do NOT finish the task because of an error from the Worker in using the tools.
             8. **ONE STEP AT A TIME**: Give the Worker ONE simple action per turn. Do NOT chain multiple steps. 
                - BAD: "1. Search project 2. Get employee 3. Call respond"
                - GOOD: "Search for project 'X' and return the project ID"
@@ -710,24 +712,41 @@ class EvaluatorAgent:
             10. **LINK TYPES**: When using `respond`, construct the `links` list carefully.
                 - **ALLOWED KINDS**: 'employee', 'project', 'customer'. 
                 - **FORBIDDEN**: 'time_entry' (causes crash), 'wiki', 'task'. NEVER use these.
+            11. [CRITICAL] **SCOPED SEARCH FOR WRITES**: If the task requires a **WRITE** action (Log, Update, Change) and the user is **Level 2 or 3**:
+                - User can log another employee time only in the projects the user owns/leads.
+                - [MANDATORY] DO NOT search the projects by name.
+                - USE: `search_projects(team=current_user)`
+                - REASON: Broad searches will return projects the user cannot edit, causing false failures.
             </PRIME_DIRECTIVES>
             
             <EDGE_CASES>
             - **Search**: Provide the Worker with the correct set of keywords to search for:
                 - User can provide redundant keywords in titles like addressing Mr. or Frau or common words (project, team).
                 - User can provide misspelled keywords (e.g., "Garmany" instead of "Germany").
+            - **API Errors**: If user makes API allowed calls (permitted by the rulebook) that return disabled access, that means that the system works incorrectly.
             - **Executive Numeric Requests**: If an Executive requests a numeric update (e.g., 'raise salary by +10'), **EXECUTE LITERALLY**.
             - **Ambiguous Queries**: If the query is subjective (e.g., "cool project", "best employee") and cannot be resolved with certainty, use outcome `none_clarification_needed`.
             - **Limit Exceeded / Access Block**: If a tool returns "page limit exceeded: X > -1", this indicates the endpoint is DISABLED for this user due to access rights.
                 - **FIX**: Switch to a filtered tool immediately (e.g., `search_projects(team=user_id)`).
+                - **ALLOWED**: search_projects(team=user_id) is allowed for Level 1, 2, and 3.
             - **Archived projects**: When searching for projects by name, ALWAYS set `include_archived=True`.
             - **Time logging**: Calculate dates from `who_ami().today`. 'yesterday' = today - 1 day.
             - **Project Links**: When answering questions about a specific project, **ALWAYS** include the project ID in the `links` list.
             - **Stop Condition**: If a search returns empty, **RETRY** with broader terms or client-side filtering logic before giving up.
+            - **Clarification**: Do NOT ask user for clarification untill you are not tried to find the information yourself.
             </EDGE_CASES>
 
+            <MAIN REASONING LOOP>
+            1. Analyze the task description and the whole context (wiki, diectives, edge cases, user info, benchmark info, history log).
+            2. Pay much attention to Prime Directives and Edge Cases.
+            3. Make 3 assumptions about the task and the context.
+            4. Define the action that will allow you to confirm or refute your assumptions.
+            5. Provide the Worker with the INSTRUCTION to perform the action.
+            6. Before giving INSTRUCTIONS, always make a draft of them and compare the draft with Prime Directives and Edge Cases one more time.
+            </MAIN REASONING LOOP>
+
             <OUTPUT_FORMAT>
-            THOUGHT: [Reasoning based on logs and context]
+            THOUGHT: [MAIN REASONING LOOP THOUGHT]
             DECISION: [PROCEED | FINISH]
             INSTRUCTION: [ONE single action for the Worker. Keep it simple - just one API call or one respond call.]
             </OUTPUT_FORMAT>
@@ -859,7 +878,7 @@ class WikiAgent:
             
             OUTPUT: 
             1.Concise summary of relevant info. Say "No relevant wiki information found." if nothing applies.
-            2. User role and access level.
+            2.User role and access level.
         """)
         
         print(f"[WikiAgent] Extracting relevant info from {len(wiki_content)} pages...", flush=True)
@@ -945,7 +964,7 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
     # Add wiki knowledge to user context for Evaluator
     user_context["wiki_knowledge"] = relevant_wiki
 
-    max_turns = 7 
+    max_turns = 8 
     for turn in range(max_turns):
         print(f"\n--- TURN {turn + 1} ---", flush=True)
         logger.clear()
@@ -1041,7 +1060,10 @@ def run_coordinator(model_id: str, api: ERC3, task: TaskInfo):
 # MAIN
 # ==============================================================================
 def main():
-    MODEL_ID = "nebius/openai/gpt-oss-120b"
+    #MODEL_ID = "nebius/openai/gpt-oss-120b"
+    #MODEL_ID = "openai/Qwen/Qwen3-235B-A22B-Thinking-2507"
+    #MODEL_ID = "openai/deepseek-ai/DeepSeek-R1-0528"
+    MODEL_ID = "openai/deepseek-ai/DeepSeek-V3-0324"
     
     if "ERC3_API_KEY" not in os.environ:
         print("ERROR: 'ERC3_API_KEY' is missing. Check your .env file.")
